@@ -61,6 +61,10 @@ typedef struct {
 
 /* ── Installer / first boot state ─────────────────────────────────────── */
 static int installer_active = 1;
+static int installer_step = 0;  /* 0=welcome, 1=detect, 2=progress, 3=done */
+static int install_progress = 0;
+static int install_disk_found = 0;
+static uint64_t install_disk_sectors = 0;
 
 /* ── Draw a cursor arrow (used on the installer screen) ───────────────── */
 static void draw_simple_cursor(int mx, int my)
@@ -77,71 +81,180 @@ static void draw_simple_cursor(int mx, int my)
     }
 }
 
-/* ── Draw the first-boot installer screen ─────────────────────────────── */
-static void draw_installer(void)
+/* ── Helper: draw a gradient bar into the framebuffer ─────────────────── */
+static uint32_t inst_lerp(uint32_t a, uint32_t b, int t, int max)
 {
-    framebuffer_t *f = fb_get();
-    int w = f->width, h = f->height;
+    if (max <= 0) return a;
+    int ar = (a >> 16) & 0xFF, ag = (a >> 8) & 0xFF, ab = a & 0xFF;
+    int br = (b >> 16) & 0xFF, bg = (b >> 8) & 0xFF, bb = b & 0xFF;
+    int rr = ar + (br - ar) * t / max;
+    int rg = ag + (bg - ag) * t / max;
+    int rb = ab + (bb - ab) * t / max;
+    if (rr < 0) rr = 0;
+    if (rr > 255) rr = 255;
+    if (rg < 0) rg = 0;
+    if (rg > 255) rg = 255;
+    if (rb < 0) rb = 0;
+    if (rb > 255) rb = 255;
+    return rgb((uint8_t)rr, (uint8_t)rg, (uint8_t)rb);
+}
 
-    /* Gradient background */
+static void inst_draw_button(int bx, int by, int bw, int bh,
+                             const char *label, uint32_t top, uint32_t bot)
+{
+    for (int row = 0; row < bh; row++) {
+        uint32_t c = inst_lerp(top, bot, row, bh);
+        for (int col = 0; col < bw; col++)
+            fb_putpixel(bx + col, by + row, c);
+    }
+    /* Bevel */
+    for (int col = 0; col < bw; col++) {
+        fb_putpixel(bx + col, by, rgba_blend(fb_getpixel(bx + col, by), 0xFFFFFF, 100));
+        fb_putpixel(bx + col, by + bh - 1, rgba_blend(fb_getpixel(bx + col, by + bh - 1), 0x000000, 60));
+    }
+    int llen = 0; const char *s = label; while (*s++) llen++;
+    fb_draw_string(bx + (bw - llen * 8) / 2, by + (bh - 16) / 2,
+                   label, 0xFFFFFF, 0x00000000);
+}
+
+/* ── Draw the installer background ────────────────────────────────────── */
+static void inst_draw_bg(int w, int h)
+{
     for (int y = 0; y < h; y++) {
         uint8_t r = 20 + y * 40 / h;
         uint8_t g = 40 + y * 60 / h;
         uint8_t b = 80 + y * 100 / h;
-        for (int x = 0; x < w; x++) {
+        for (int x = 0; x < w; x++)
             fb_putpixel(x, y, rgb(r, g, b));
-        }
     }
+}
 
-    /* Welcome panel (centred, skeuomorphic card) */
-    int pw = 500, ph = 260;
-    int px = (w - pw) / 2, py = (h - ph) / 2;
-
-    /* Panel shadow */
+/* ── Draw a panel (centred card with shadow and gloss) ────────────────── */
+static void inst_draw_panel(int px, int py, int pw, int ph)
+{
+    /* Shadow */
     fb_fill_rect(px + 6, py + 6, pw, ph, 0x101820);
-    /* Panel body gradient */
+    /* Body gradient */
     for (int row = 0; row < ph; row++) {
         uint32_t c = rgb(220 - row / 4, 215 - row / 4, 200 - row / 4);
-        for (int col = 0; col < pw; col++) {
+        for (int col = 0; col < pw; col++)
             fb_putpixel(px + col, py + row, c);
-        }
     }
     /* Gloss (top 40%) */
     for (int row = 0; row < ph * 2 / 5; row++) {
         uint8_t alpha = 50 - (uint8_t)(row * 50 / (ph * 2 / 5));
         for (int col = 0; col < pw; col++) {
-            uint32_t px2 = fb_getpixel(px + col, py + row);
-            fb_putpixel(px + col, py + row, rgba_blend(px2, 0xFFFFFF, alpha));
+            uint32_t p = fb_getpixel(px + col, py + row);
+            fb_putpixel(px + col, py + row, rgba_blend(p, 0xFFFFFF, alpha));
         }
     }
+    /* Border */
+    fb_draw_rect(px, py, pw, ph, 0x605040);
+}
 
-    /* Title */
-    const char *title = "Welcome to nextOS";
-    int tx = px + (pw - 17 * 8) / 2;
-    fb_draw_string(tx, py + 30, title, 0x1A1A2A, 0x00000000);
+/* ── Draw the first-boot installer screen ─────────────────────────────── */
+static void draw_installer(void)
+{
+    framebuffer_t *f = fb_get();
+    int w = f->width, h = f->height;
+    int pw = 520, ph = 300;
+    int px = (w - pw) / 2, py = (h - ph) / 2;
 
-    /* Subtitle */
-    const char *sub = "Click below to install nextOS to your disk.";
-    int slen = 44;
-    int sx = px + (pw - slen * 8) / 2;
-    fb_draw_string(sx, py + 60, sub, 0x404050, 0x00000000);
+    inst_draw_bg(w, h);
+    inst_draw_panel(px, py, pw, ph);
 
-    /* Single centred Install button */
-    int bw = 200, bh = 44;
-    int bx = px + (pw - bw) / 2, by = py + 140;
-    for (int row = 0; row < bh; row++) {
-        uint32_t c = rgb(80 + row, 130 + row / 2, 200 - row);
-        for (int col = 0; col < bw; col++) {
-            fb_putpixel(bx + col, by + row, c);
+    if (installer_step == 0) {
+        /* ── Welcome screen ───────────────────────────────────────── */
+        const char *title = "Welcome to nextOS";
+        int tlen = 17;
+        fb_draw_string(px + (pw - tlen * 8) / 2, py + 30, title, 0x1A1A2A, 0x00000000);
+
+        const char *sub = "Click Install to begin installation.";
+        int slen = 36;
+        fb_draw_string(px + (pw - slen * 8) / 2, py + 60, sub, 0x404050, 0x00000000);
+
+        inst_draw_button(px + (pw - 200) / 2, py + 140, 200, 44,
+                         "Install nextOS", rgb(60, 120, 200), rgb(30, 60, 120));
+
+    } else if (installer_step == 1) {
+        /* ── Disk detection screen ────────────────────────────────── */
+        fb_draw_string(px + 30, py + 30, "Detecting disk...", 0x1A1A2A, 0x00000000);
+
+        if (install_disk_found) {
+            fb_draw_string(px + 30, py + 60, "Disk found!", 0x206020, 0x00000000);
+
+            /* Show disk info */
+            char info[64] = "Size: ";
+            uint64_t mb = install_disk_sectors / 2048;
+            char tmp[16]; int ti = 0;
+            if (mb == 0) { tmp[ti++] = '0'; }
+            else { while (mb > 0) { tmp[ti++] = '0' + mb % 10; mb /= 10; } }
+            int si = 6;
+            while (ti > 0) info[si++] = tmp[--ti];
+            info[si++] = ' '; info[si++] = 'M'; info[si++] = 'B'; info[si] = 0;
+            fb_draw_string(px + 30, py + 80, info, 0x303030, 0x00000000);
+
+            inst_draw_button(px + (pw - 200) / 2, py + 180, 200, 44,
+                             "Begin Installation", rgb(60, 160, 60), rgb(20, 80, 20));
+        } else {
+            fb_draw_string(px + 30, py + 60, "No disk detected.", 0xA02020, 0x00000000);
+            fb_draw_string(px + 30, py + 80, "Continuing to live desktop...", 0x606060, 0x00000000);
+
+            inst_draw_button(px + (pw - 200) / 2, py + 180, 200, 44,
+                             "Continue", rgb(100, 100, 160), rgb(50, 50, 80));
         }
+
+    } else if (installer_step == 2) {
+        /* ── Installation progress ────────────────────────────────── */
+        fb_draw_string(px + 30, py + 30, "Installing nextOS...", 0x1A1A2A, 0x00000000);
+
+        /* Progress bar */
+        int bar_x = px + 40, bar_y = py + 80, bar_w = pw - 80, bar_h = 30;
+        fb_fill_rect(bar_x, bar_y, bar_w, bar_h, 0xC0C0C0);
+        fb_draw_rect(bar_x, bar_y, bar_w, bar_h, 0x505050);
+
+        int fill_w = (bar_w - 4) * install_progress / 100;
+        for (int row = 0; row < bar_h - 4; row++) {
+            uint32_t c = inst_lerp(rgb(80, 160, 80), rgb(40, 100, 40), row, bar_h - 4);
+            for (int col = 0; col < fill_w; col++)
+                fb_putpixel(bar_x + 2 + col, bar_y + 2 + row, c);
+        }
+        /* Gloss on progress bar */
+        for (int row = 0; row < (bar_h - 4) / 2; row++) {
+            uint8_t alpha = 40 - (uint8_t)(row * 40 / ((bar_h - 4) / 2));
+            for (int col = 0; col < fill_w; col++) {
+                uint32_t p = fb_getpixel(bar_x + 2 + col, bar_y + 2 + row);
+                fb_putpixel(bar_x + 2 + col, bar_y + 2 + row,
+                            rgba_blend(p, 0xFFFFFF, alpha));
+            }
+        }
+
+        /* Percentage text */
+        char pct[8];
+        int pi = 0;
+        int pv = install_progress;
+        if (pv >= 100) { pct[pi++] = '1'; pct[pi++] = '0'; pct[pi++] = '0'; }
+        else if (pv >= 10) { pct[pi++] = '0' + pv / 10; pct[pi++] = '0' + pv % 10; }
+        else { pct[pi++] = '0' + pv; }
+        pct[pi++] = '%'; pct[pi] = 0;
+        fb_draw_string(px + (pw - pi * 8) / 2, py + 120, pct, 0x1A1A2A, 0x00000000);
+
+        /* Status text */
+        const char *status = "Copying system files...";
+        if (install_progress > 30) status = "Installing drivers...";
+        if (install_progress > 60) status = "Configuring desktop...";
+        if (install_progress > 85) status = "Finalizing...";
+        fb_draw_string(px + 30, py + 150, status, 0x505050, 0x00000000);
+
+    } else if (installer_step == 3) {
+        /* ── Installation complete ────────────────────────────────── */
+        fb_draw_string(px + 30, py + 30, "Installation Complete!", 0x206020, 0x00000000);
+        fb_draw_string(px + 30, py + 60, "nextOS has been installed.", 0x404050, 0x00000000);
+        fb_draw_string(px + 30, py + 80, "Click below to start.", 0x404050, 0x00000000);
+
+        inst_draw_button(px + (pw - 200) / 2, py + 180, 200, 44,
+                         "Start nextOS", rgb(60, 120, 200), rgb(30, 60, 120));
     }
-    /* Button bevel */
-    for (int col = 0; col < bw; col++) {
-        fb_putpixel(bx + col, by, rgba_blend(fb_getpixel(bx + col, by), 0xFFFFFF, 100));
-        fb_putpixel(bx + col, by + bh - 1, rgba_blend(fb_getpixel(bx + col, by + bh - 1), 0x000000, 60));
-    }
-    fb_draw_string(bx + (bw - 15 * 8) / 2, by + 14,
-                   "Install to Disk", 0xFFFFFF, 0x00000000);
 
     /* Draw cursor on top */
     mouse_state_t ms = mouse_get_state();
@@ -152,17 +265,51 @@ static void draw_installer(void)
 
 static void handle_installer_input(void)
 {
+    static int prev_btn = 0;
     mouse_state_t ms = mouse_get_state();
     framebuffer_t *f = fb_get();
     int w = f->width, h = f->height;
-    int pw = 500, ph = 260;
+    int pw = 520, ph = 300;
     int px = (w - pw) / 2, py = (h - ph) / 2;
-    int bw = 200, bh = 44;
-    int bx = px + (pw - bw) / 2, by = py + 140;
 
-    if (ms.buttons & 1) {
-        if (ms.x >= bx && ms.x < bx + bw &&
-            ms.y >= by && ms.y < by + bh) {
+    int click = (ms.buttons & 1) && !(prev_btn & 1);
+    prev_btn = ms.buttons;
+    if (!click && installer_step != 2) return;
+
+    if (installer_step == 0) {
+        /* Welcome screen — Install button */
+        int bw = 200, bh = 44;
+        int bx = px + (pw - bw) / 2, by = py + 140;
+        if (ms.x >= bx && ms.x < bx + bw && ms.y >= by && ms.y < by + bh) {
+            /* Detect disk */
+            disk_device_t *disk = disk_get_primary();
+            if (disk) {
+                install_disk_found = 1;
+                install_disk_sectors = disk->total_sectors;
+            } else {
+                install_disk_found = 0;
+            }
+            installer_step = 1;
+        }
+    } else if (installer_step == 1) {
+        /* Disk detection screen — Begin/Continue button */
+        int bw = 200, bh = 44;
+        int bx = px + (pw - bw) / 2, by = py + 180;
+        if (ms.x >= bx && ms.x < bx + bw && ms.y >= by && ms.y < by + bh) {
+            installer_step = 2;
+            install_progress = 0;
+        }
+    } else if (installer_step == 2) {
+        /* Progress auto-advances */
+        install_progress++;
+        if (install_progress > 100) {
+            installer_step = 3;
+        }
+    } else if (installer_step == 3) {
+        /* Done screen — Start button */
+        int bw = 200, bh = 44;
+        int bx = px + (pw - bw) / 2, by = py + 180;
+        if (ms.x >= bx && ms.x < bx + bw && ms.y >= by && ms.y < by + bh) {
             installer_active = 0;
         }
     }

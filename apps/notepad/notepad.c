@@ -44,6 +44,40 @@ static int       dialog_input_len = 0;
 #define COL_DIALOG_BRD 0x8B7D6B
 #define COL_INPUT_BG   0xFFFFF0
 
+/* ── Canvas font renderer ─────────────────────────────────────────────── */
+extern const uint8_t font_8x16[95][16];
+
+static void canvas_draw_char(uint32_t *canvas, int cw, int ch,
+                             int x, int y, char c, uint32_t fg)
+{
+    if (c < 32 || c > 126) c = '?';
+    const uint8_t *glyph = font_8x16[c - 32];
+    for (int row = 0; row < 16; row++) {
+        int py = y + row;
+        if (py < 0 || py >= ch) continue;
+        uint8_t bits = glyph[row];
+        for (int col = 0; col < 8; col++) {
+            if (bits & (0x80 >> col)) {
+                int px = x + col;
+                if (px >= 0 && px < cw)
+                    canvas[py * cw + px] = fg;
+            }
+        }
+    }
+}
+
+static void canvas_draw_string(uint32_t *canvas, int cw, int ch,
+                               int x, int y, const char *s, uint32_t fg)
+{
+    int cx = x;
+    while (*s) {
+        if (*s >= 32 && *s <= 126)
+            canvas_draw_char(canvas, cw, ch, cx, y, *s, fg);
+        cx += 8;
+        s++;
+    }
+}
+
 /* ── Helpers ──────────────────────────────────────────────────────────── */
 static void fill_rect(uint32_t *c, int cw, int ch,
                       int x, int y, int w, int h, uint32_t color)
@@ -64,12 +98,19 @@ static void draw_gradient(uint32_t *c, int cw, int ch,
     for (int r = 0; r < h; r++) {
         int py = y + r;
         if (py < 0 || py >= ch) continue;
-        uint8_t tr = (top>>16)&0xFF, tg = (top>>8)&0xFF, tb = top&0xFF;
-        uint8_t bot_r = (bot>>16)&0xFF, bot_g = (bot>>8)&0xFF, bot_b = bot&0xFF;
-        uint8_t rr = tr + (bot_r - tr) * r / (h > 1 ? h - 1 : 1);
-        uint8_t rg = tg + (bot_g - tg) * r / (h > 1 ? h - 1 : 1);
-        uint8_t rb = tb + (bot_b - tb) * r / (h > 1 ? h - 1 : 1);
-        uint32_t color = ((uint32_t)rr << 16) | ((uint32_t)rg << 8) | rb;
+        int tr = (top>>16)&0xFF, tg = (top>>8)&0xFF, tb = top&0xFF;
+        int bot_r = (bot>>16)&0xFF, bot_g = (bot>>8)&0xFF, bot_b = bot&0xFF;
+        int denom = (h > 1 ? h - 1 : 1);
+        int rr = tr + (bot_r - tr) * r / denom;
+        int rg = tg + (bot_g - tg) * r / denom;
+        int rb = tb + (bot_b - tb) * r / denom;
+        if (rr < 0) rr = 0;
+        if (rr > 255) rr = 255;
+        if (rg < 0) rg = 0;
+        if (rg > 255) rg = 255;
+        if (rb < 0) rb = 0;
+        if (rb > 255) rb = 255;
+        uint32_t color = ((uint32_t)rr << 16) | ((uint32_t)rg << 8) | (uint32_t)rb;
         for (int col = x; col < x + w && col < cw; col++) {
             if (col < 0) continue;
             c[py * cw + col] = color;
@@ -109,11 +150,12 @@ static void draw_text_area(uint32_t *canvas, int cw, int ch)
             line++;
             col = 0;
         } else {
-            /* Character is rendered by the canvas; store position for overlay */
+            /* Render character glyph into canvas */
             if (screen_y >= text_y_start && screen_y < ch - 4 &&
                 text_x + col * CHAR_WIDTH < cw - 4) {
-                /* For the canvas, we just mark the text position.
-                 * The actual glyph rendering uses fb_draw_char on swap. */
+                canvas_draw_char(canvas, cw, ch,
+                                 text_x + col * CHAR_WIDTH, screen_y,
+                                 text_buf[i], COL_TEXT_COL);
             }
             col++;
         }
@@ -137,12 +179,19 @@ static void draw_dialog(uint32_t *canvas, int cw, int ch)
         canvas[i * cw + dx + dw - 1] = COL_DIALOG_BRD;
     }
 
+    /* Title */
+    const char *title = (dialog_mode == 1) ? "Open File:" : "Save File:";
+    canvas_draw_string(canvas, cw, ch, dx + 20, dy + 12, title, 0x1A1A1A);
+
     /* Input field */
     fill_rect(canvas, cw, ch, dx + 20, dy + 40, dw - 40, 24, COL_INPUT_BG);
+    /* Draw current input text */
+    canvas_draw_string(canvas, cw, ch, dx + 24, dy + 44, dialog_input, 0x1A1A1A);
 
     /* OK button */
     draw_gradient(canvas, cw, ch, dx + dw - 80, dy + dh - 32, 60, 24,
                   COL_BTN_T, COL_BTN_B);
+    canvas_draw_string(canvas, cw, ch, dx + dw - 68, dy + dh - 28, "OK", 0x1A1A1A);
 }
 
 /* ── Paint callback ───────────────────────────────────────────────────── */
@@ -158,8 +207,11 @@ static void notepad_paint(window_t *win)
 
     /* File | Open | Save buttons */
     draw_gradient(win->canvas, cw, ch, 4, 4, 50, 24, COL_BTN_T, COL_BTN_B);
+    canvas_draw_string(win->canvas, cw, ch, 12, 8, "New", 0x1A1A1A);
     draw_gradient(win->canvas, cw, ch, 60, 4, 50, 24, COL_BTN_T, COL_BTN_B);
+    canvas_draw_string(win->canvas, cw, ch, 64, 8, "Open", 0x1A1A1A);
     draw_gradient(win->canvas, cw, ch, 116, 4, 50, 24, COL_BTN_T, COL_BTN_B);
+    canvas_draw_string(win->canvas, cw, ch, 120, 8, "Save", 0x1A1A1A);
 
     /* Paper area */
     int paper_y = 32;
@@ -361,7 +413,8 @@ static void notepad_key(window_t *win, char ascii, int scancode, int pressed)
 /* ── Public: launch notepad ───────────────────────────────────────────── */
 void notepad_launch(void)
 {
-    if (notepad_win) return;
+    if (notepad_win && notepad_win->active) return;
+    notepad_win = (void *)0;
 
     text_len = 0;
     cursor_pos = 0;

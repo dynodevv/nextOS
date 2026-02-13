@@ -77,15 +77,44 @@ static void draw_canvas_gradient(uint32_t *canvas, int cw, int ch,
     for (int row = 0; row < h; row++) {
         int py = y + row;
         if (py < 0 || py >= ch) continue;
-        uint8_t tr = (top>>16)&0xFF, tg = (top>>8)&0xFF, tb = top&0xFF;
-        uint8_t bot_r = (bot>>16)&0xFF, bot_g = (bot>>8)&0xFF, bot_b = bot&0xFF;
-        uint8_t rr = tr + (bot_r - tr) * row / (h > 1 ? h - 1 : 1);
-        uint8_t rg = tg + (bot_g - tg) * row / (h > 1 ? h - 1 : 1);
-        uint8_t rb = tb + (bot_b - tb) * row / (h > 1 ? h - 1 : 1);
-        uint32_t c = ((uint32_t)rr << 16) | ((uint32_t)rg << 8) | rb;
+        int tr = (top>>16)&0xFF, tg = (top>>8)&0xFF, tb = top&0xFF;
+        int bot_r = (bot>>16)&0xFF, bot_g = (bot>>8)&0xFF, bot_b = bot&0xFF;
+        int denom = (h > 1 ? h - 1 : 1);
+        int rr = tr + (bot_r - tr) * row / denom;
+        int rg = tg + (bot_g - tg) * row / denom;
+        int rb = tb + (bot_b - tb) * row / denom;
+        if (rr < 0) rr = 0;
+        if (rr > 255) rr = 255;
+        if (rg < 0) rg = 0;
+        if (rg > 255) rg = 255;
+        if (rb < 0) rb = 0;
+        if (rb > 255) rb = 255;
+        uint32_t c = ((uint32_t)rr << 16) | ((uint32_t)rg << 8) | (uint32_t)rb;
         for (int col = x; col < x + w && col < cw; col++) {
             if (col < 0) continue;
             canvas[py * cw + col] = c;
+        }
+    }
+}
+
+/* Minimal built-in font render directly into canvas */
+extern const uint8_t font_8x16[95][16]; /* defined in framebuffer.c */
+
+static void canvas_draw_char(uint32_t *canvas, int cw, int ch,
+                             int x, int y, char c, uint32_t fg)
+{
+    if (c < 32 || c > 126) c = '?';
+    const uint8_t *glyph = font_8x16[c - 32];
+    for (int row = 0; row < 16; row++) {
+        int py = y + row;
+        if (py < 0 || py >= ch) continue;
+        uint8_t bits = glyph[row];
+        for (int col = 0; col < 8; col++) {
+            if (bits & (0x80 >> col)) {
+                int px = x + col;
+                if (px >= 0 && px < cw)
+                    canvas[py * cw + px] = fg;
+            }
         }
     }
 }
@@ -94,33 +123,15 @@ static void draw_canvas_string(uint32_t *canvas, int cw, int ch,
                                int x, int y, const char *s,
                                uint32_t fg, uint32_t bg)
 {
-    (void)ch; (void)fg;
-    /* We write to the canvas, which the compositor blits later.
-     * For simplicity, we use the framebuffer font renderer indirectly
-     * by writing colored rectangles. Here we do a simple 8x16 draw. */
+    (void)bg;
     int cx = x;
     while (*s) {
-        if (*s >= 32 && *s <= 126) {
-            /* Mark area — actual glyph rendering happens via fb_draw_string
-             * in the compositor. For the canvas, store fg colour in a grid. */
-            for (int row = 0; row < 16; row++) {
-                int py = y + row;
-                if (py < 0 || py >= ch) continue;
-                for (int col = 0; col < 8; col++) {
-                    int px = cx + col;
-                    if (px < 0 || px >= cw) continue;
-                    /* Simple: just write bg for now; the compositor overlays text */
-                    canvas[py * cw + px] = bg;
-                }
-            }
-        }
+        if (*s >= 32 && *s <= 126)
+            canvas_draw_char(canvas, cw, ch, cx, y, *s, fg);
         cx += 8;
         s++;
     }
 }
-
-/* Minimal built-in font render directly into canvas */
-extern const uint8_t font_8x16[95][16]; /* defined in framebuffer.c — not static */
 
 /* ── Tab drawing ──────────────────────────────────────────────────────── */
 static const char *tab_names[TAB_COUNT] = { "Display", "Theme", "Keyboard" };
@@ -321,7 +332,8 @@ static void settings_key(window_t *win, char ascii, int scancode, int pressed)
 /* ── Public: launch settings ──────────────────────────────────────────── */
 void settings_launch(void)
 {
-    if (settings_win) return; /* already open */
+    if (settings_win && settings_win->active) return; /* already open */
+    settings_win = (void *)0;
 
     settings_win = compositor_create_window("Settings", 100, 60, 380, 340);
     if (!settings_win) return;

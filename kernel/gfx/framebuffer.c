@@ -399,8 +399,10 @@ void fb_draw_char(int x, int y, char c, uint32_t fg, uint32_t bg)
     for (int row = 0; row < 16; row++) {
         uint8_t bits = glyph[row];
         for (int col = 0; col < 8; col++) {
-            uint32_t color = (bits & (0x80 >> col)) ? fg : bg;
-            fb_putpixel(x + col, y + row, color);
+            if (bits & (0x80 >> col))
+                fb_putpixel(x + col, y + row, fg);
+            else if (bg != 0)
+                fb_putpixel(x + col, y + row, bg);
         }
     }
 }

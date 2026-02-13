@@ -49,6 +49,40 @@ static void str_cat(char *d, const char *s) {
     *d = 0;
 }
 
+/* ── Canvas font renderer ─────────────────────────────────────────────── */
+extern const uint8_t font_8x16[95][16];
+
+static void canvas_draw_char(uint32_t *canvas, int cw, int ch,
+                             int x, int y, char c, uint32_t fg)
+{
+    if (c < 32 || c > 126) c = '?';
+    const uint8_t *glyph = font_8x16[c - 32];
+    for (int row = 0; row < 16; row++) {
+        int py = y + row;
+        if (py < 0 || py >= ch) continue;
+        uint8_t bits = glyph[row];
+        for (int col = 0; col < 8; col++) {
+            if (bits & (0x80 >> col)) {
+                int px = x + col;
+                if (px >= 0 && px < cw)
+                    canvas[py * cw + px] = fg;
+            }
+        }
+    }
+}
+
+static void canvas_draw_string(uint32_t *canvas, int cw, int ch,
+                               int x, int y, const char *s, uint32_t fg)
+{
+    int cx = x;
+    while (*s) {
+        if (*s >= 32 && *s <= 126)
+            canvas_draw_char(canvas, cw, ch, cx, y, *s, fg);
+        cx += 8;
+        s++;
+    }
+}
+
 static void fill_rect(uint32_t *canvas, int cw, int ch,
                       int x, int y, int w, int h, uint32_t color)
 {
@@ -68,12 +102,19 @@ static void draw_gradient(uint32_t *canvas, int cw, int ch,
     for (int row = 0; row < h; row++) {
         int py = y + row;
         if (py < 0 || py >= ch) continue;
-        uint8_t tr = (top>>16)&0xFF, tg = (top>>8)&0xFF, tb = top&0xFF;
-        uint8_t bot_r = (bot>>16)&0xFF, bot_g = (bot>>8)&0xFF, bot_b = bot&0xFF;
-        uint8_t rr = tr + (bot_r - tr) * row / (h > 1 ? h - 1 : 1);
-        uint8_t rg = tg + (bot_g - tg) * row / (h > 1 ? h - 1 : 1);
-        uint8_t rb = tb + (bot_b - tb) * row / (h > 1 ? h - 1 : 1);
-        uint32_t c = ((uint32_t)rr << 16) | ((uint32_t)rg << 8) | rb;
+        int tr = (top>>16)&0xFF, tg = (top>>8)&0xFF, tb = top&0xFF;
+        int bot_r = (bot>>16)&0xFF, bot_g = (bot>>8)&0xFF, bot_b = bot&0xFF;
+        int denom = (h > 1 ? h - 1 : 1);
+        int rr = tr + (bot_r - tr) * row / denom;
+        int rg = tg + (bot_g - tg) * row / denom;
+        int rb = tb + (bot_b - tb) * row / denom;
+        if (rr < 0) rr = 0;
+        if (rr > 255) rr = 255;
+        if (rg < 0) rg = 0;
+        if (rg > 255) rg = 255;
+        if (rb < 0) rb = 0;
+        if (rb > 255) rb = 255;
+        uint32_t c = ((uint32_t)rr << 16) | ((uint32_t)rg << 8) | (uint32_t)rb;
         for (int col = x; col < x + w && col < cw; col++) {
             if (col < 0) continue;
             canvas[py * cw + col] = c;
@@ -145,10 +186,11 @@ static void explorer_paint(window_t *win)
     /* Back button */
     draw_gradient(win->canvas, cw, ch, 4, 4, 50, 24,
                   0xD8D0C0, 0xA8A090);
-    /* "Back" label is rendered by text overlay */
+    canvas_draw_string(win->canvas, cw, ch, 12, 8, "Back", COL_TEXT);
 
     /* Path bar */
     fill_rect(win->canvas, cw, ch, 60, 4, cw - 70, 24, COL_PATH_BG);
+    canvas_draw_string(win->canvas, cw, ch, 64, 8, current_path, COL_TEXT);
 
     /* File list area */
     int list_y = 36;
@@ -171,8 +213,10 @@ static void explorer_paint(window_t *win)
             draw_file_icon(win->canvas, cw, ch, 8, ey + 5);
         }
 
-        /* Name — stored in canvas as bg colour; text overlay happens
-         * via compositor fb_draw_string in a real integration. */
+        /* Name */
+        uint32_t text_c = (ei == selected_index) ? COL_TEXT_SEL : COL_TEXT;
+        canvas_draw_string(win->canvas, cw, ch, 28, ey + 4,
+                           entries[ei].name, text_c);
     }
 
     /* Scrollbar track */
@@ -188,6 +232,20 @@ static void explorer_paint(window_t *win)
     /* Status bar */
     int sb_y = ch - 20;
     fill_rect(win->canvas, cw, ch, 0, sb_y, cw, 20, 0xD0C8B8);
+    /* Show entry count */
+    char status[64];
+    int si = 0;
+    /* itoa inline */
+    int ec = entry_count;
+    if (ec == 0) { status[si++] = '0'; }
+    else {
+        char tmp[16]; int ti = 0;
+        while (ec > 0) { tmp[ti++] = '0' + ec % 10; ec /= 10; }
+        while (ti > 0) status[si++] = tmp[--ti];
+    }
+    status[si++] = ' '; status[si++] = 'i'; status[si++] = 't';
+    status[si++] = 'e'; status[si++] = 'm'; status[si++] = 's'; status[si] = 0;
+    canvas_draw_string(win->canvas, cw, ch, 8, sb_y + 2, status, COL_TEXT);
 }
 
 /* ── Mouse callback ───────────────────────────────────────────────────── */
@@ -265,7 +323,8 @@ static void explorer_key(window_t *win, char ascii, int scancode, int pressed)
 /* ── Public: launch explorer ──────────────────────────────────────────── */
 void explorer_launch(void)
 {
-    if (explorer_win) return;
+    if (explorer_win && explorer_win->active) return;
+    explorer_win = (void *)0;
 
     /* Initialize at root */
     vfs_node_t *root = vfs_get_root();
