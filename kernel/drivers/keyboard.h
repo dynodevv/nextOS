@@ -48,6 +48,9 @@ typedef enum {
     KB_LAYOUT_COUNT
 } kb_layout_t;
 
+/* Extended scancode constants (after E0 prefix) */
+#define KEY_SCANCODE_LWIN  0x5B
+
 void         keyboard_init(void);
 void         keyboard_set_layout(kb_layout_t layout);
 kb_layout_t  keyboard_get_layout(void);

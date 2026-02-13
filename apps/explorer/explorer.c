@@ -320,6 +320,13 @@ static void explorer_key(window_t *win, char ascii, int scancode, int pressed)
     }
 }
 
+/* ── Close callback ────────────────────────────────────────────────────── */
+static void explorer_close(window_t *win)
+{
+    (void)win;
+    explorer_win = (void *)0;
+}
+
 /* ── Public: launch explorer ──────────────────────────────────────────── */
 void explorer_launch(void)
 {
@@ -339,4 +346,5 @@ void explorer_launch(void)
     explorer_win->on_paint = explorer_paint;
     explorer_win->on_mouse = explorer_mouse;
     explorer_win->on_key   = explorer_key;
+    explorer_win->on_close = explorer_close;
 }

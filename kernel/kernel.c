@@ -66,20 +66,10 @@ static int install_progress = 0;
 static int install_disk_found = 0;
 static uint64_t install_disk_sectors = 0;
 
+static void write_mbr_to_disk(void); /* forward declaration */
+
 /* ── Draw a cursor arrow (used on the installer screen) ───────────────── */
-static void draw_simple_cursor(int mx, int my)
-{
-    /* 16-pixel tall arrow: row i has pixels from col 0..arrow_width[i]-1 */
-    static const int arrow_w[] = {1,2,3,4,5,6,7,8,9,10,11,5,3,3,2,1};
-    for (int i = 0; i < 16; i++) {
-        for (int j = 0; j < arrow_w[i]; j++) {
-            if (j == 0 || j == arrow_w[i] - 1 || i == 0 || i == 15)
-                fb_putpixel(mx + j, my + i, 0x000000);
-            else
-                fb_putpixel(mx + j, my + i, 0xFFFFFF);
-        }
-    }
-}
+/* Now uses the same bitmap cursor as the desktop compositor */
 
 /* ── Helper: draw a gradient bar into the framebuffer ─────────────────── */
 static uint32_t inst_lerp(uint32_t a, uint32_t b, int t, int max)
@@ -258,7 +248,7 @@ static void draw_installer(void)
 
     /* Draw cursor on top */
     mouse_state_t ms = mouse_get_state();
-    draw_simple_cursor(ms.x, ms.y);
+    compositor_draw_cursor(ms.x, ms.y);
 
     fb_swap();
 }
@@ -300,8 +290,11 @@ static void handle_installer_input(void)
             install_progress = 0;
         }
     } else if (installer_step == 2) {
-        /* Progress auto-advances */
+        /* Progress auto-advances; write MBR at the right moment */
         install_progress++;
+        if (install_progress == 50 && install_disk_found) {
+            write_mbr_to_disk();
+        }
         if (install_progress > 100) {
             installer_step = 3;
         }
@@ -313,6 +306,176 @@ static void handle_installer_input(void)
             installer_active = 0;
         }
     }
+}
+
+/* ── MBR boot record for disk installation ────────────────────────────── */
+/*
+ * Minimal x86 real-mode MBR that prints a message and reboots on keypress.
+ * Hand-assembled 16-bit code loaded at 0x7C00 by BIOS:
+ *   cli; xor ax,ax; mov ds/es/ss,ax; mov sp,0x7C00; sti
+ *   mov si, msg; lodsb; test al,al; jz done
+ *   mov ah,0x0E; mov bx,7; int 0x10; jmp loop
+ *   done: xor ah,ah; int 0x16; int 0x19; jmp $
+ */
+static void write_mbr_to_disk(void)
+{
+    disk_device_t *disk = disk_get_primary();
+    if (!disk) return;
+
+    static uint8_t mbr[512];
+    /* Zero the sector */
+    for (int i = 0; i < 512; i++) mbr[i] = 0;
+
+    /* Boot code */
+    static const uint8_t code[] = {
+        0xFA,                       /*  0: cli                    */
+        0x31, 0xC0,                 /*  1: xor ax, ax             */
+        0x8E, 0xD8,                 /*  3: mov ds, ax             */
+        0x8E, 0xC0,                 /*  5: mov es, ax             */
+        0x8E, 0xD0,                 /*  7: mov ss, ax             */
+        0xBC, 0x00, 0x7C,           /*  9: mov sp, 0x7C00         */
+        0xFB,                       /* 12: sti                    */
+        0xBE, 0x26, 0x7C,           /* 13: mov si, 0x7C26 (msg)  */
+        /* print_loop: */
+        0xAC,                       /* 16: lodsb                  */
+        0x84, 0xC0,                 /* 17: test al, al            */
+        0x74, 0x09,                 /* 19: jz done (-> 30)        */
+        0xB4, 0x0E,                 /* 21: mov ah, 0x0E           */
+        0xBB, 0x07, 0x00,           /* 23: mov bx, 0x0007         */
+        0xCD, 0x10,                 /* 26: int 0x10               */
+        0xEB, 0xF2,                 /* 28: jmp print_loop (-> 16) */
+        /* done: */
+        0xB4, 0x00,                 /* 30: mov ah, 0              */
+        0xCD, 0x16,                 /* 32: int 0x16               */
+        0xCD, 0x19,                 /* 34: int 0x19               */
+        0xEB, 0xFE,                 /* 36: jmp $ (halt)           */
+    };
+    for (int i = 0; i < (int)sizeof(code); i++) mbr[i] = code[i];
+
+    /* Message at offset 0x26 (38) */
+    static const char msg[] =
+        "nextOS installed successfully.\r\n"
+        "Boot from CD/USB to start nextOS.\r\n"
+        "Press any key to reboot...\r\n";
+    for (int i = 0; msg[i] && (38 + i) < 510; i++)
+        mbr[38 + i] = (uint8_t)msg[i];
+
+    /* Boot signature at offset 510-511 */
+    mbr[510] = 0x55;
+    mbr[511] = 0xAA;
+
+    disk_write(disk, 0, 1, mbr);
+}
+
+/* ── System actions (shutdown, restart, about window) ─────────────────── */
+#define ACPI_PM1A_CTRL_PORT 0x604   /* QEMU ACPI power management port */
+#define ACPI_SLP_TYPa_SLP_EN 0x2000 /* S5 sleep type | sleep enable */
+#define ACPI_BOCHS_PORT     0xB004  /* Bochs-specific ACPI port */
+#define KB_CTRL_PORT        0x64    /* Keyboard controller port */
+#define KB_CMD_RESET        0xFE    /* Pulse reset line */
+
+static void system_shutdown(void)
+{
+    /* QEMU / Bochs ACPI shutdown */
+    outw(ACPI_PM1A_CTRL_PORT, ACPI_SLP_TYPa_SLP_EN);
+    /* Fallback: Bochs-specific */
+    outw(ACPI_BOCHS_PORT, ACPI_SLP_TYPa_SLP_EN);
+    /* If still running, halt */
+    while (1) __asm__ volatile("cli; hlt");
+}
+
+static void system_restart(void)
+{
+    /* Pulse the keyboard controller reset line */
+    outb(KB_CTRL_PORT, KB_CMD_RESET);
+    while (1) __asm__ volatile("cli; hlt");
+}
+
+static window_t *about_win = (void *)0;
+
+static void about_close(window_t *win)
+{
+    (void)win;
+    about_win = (void *)0;
+}
+
+static void about_paint(window_t *win)
+{
+    if (!win || !win->canvas) return;
+    int cw = win->width - 4;
+    int ch = win->height - 4;
+
+    /* Background gradient */
+    for (int row = 0; row < ch; row++) {
+        int tr = 220, tg = 215, tb = 200;
+        int br = 180, bg = 170, bb = 150;
+        int denom = (ch > 1) ? ch - 1 : 1;
+        int rr = tr + (br - tr) * row / denom;
+        int rg = tg + (bg - tg) * row / denom;
+        int rb = tb + (bb - tb) * row / denom;
+        uint32_t c = ((uint32_t)rr << 16) | ((uint32_t)rg << 8) | (uint32_t)rb;
+        for (int col = 0; col < cw; col++)
+            win->canvas[row * cw + col] = c;
+    }
+
+    /* Title */
+    extern const uint8_t font_8x16[95][16];
+    const char *title = "nextOS";
+    int tx = (cw - 6 * 8) / 2;
+    for (int i = 0; title[i]; i++) {
+        if (title[i] < 32 || title[i] > 126) continue;
+        const uint8_t *glyph = font_8x16[title[i] - 32];
+        for (int row = 0; row < 16; row++) {
+            int py = 20 + row;
+            if (py >= ch) continue;
+            uint8_t bits = glyph[row];
+            for (int col = 0; col < 8; col++) {
+                if (bits & (0x80 >> col)) {
+                    int px = tx + i * 8 + col;
+                    if (px >= 0 && px < cw)
+                        win->canvas[py * cw + px] = 0x1A1A2A;
+                }
+            }
+        }
+    }
+
+    /* Version & info lines */
+    const char *lines[] = {
+        "Version 1.0",
+        "",
+        "A next-generation",
+        "operating system.",
+        "",
+        "64-bit x86_64 kernel",
+    };
+    for (int l = 0; l < 6; l++) {
+        const char *s = lines[l];
+        int sy = 50 + l * 18;
+        for (int i = 0; s[i] && s[i] >= 32 && s[i] <= 126; i++) {
+            const uint8_t *glyph = font_8x16[s[i] - 32];
+            for (int row = 0; row < 16; row++) {
+                int py = sy + row;
+                if (py >= ch) continue;
+                uint8_t bits = glyph[row];
+                for (int col = 0; col < 8; col++) {
+                    if (bits & (0x80 >> col)) {
+                        int px = 20 + i * 8 + col;
+                        if (px >= 0 && px < cw)
+                            win->canvas[py * cw + px] = 0x303040;
+                    }
+                }
+            }
+        }
+    }
+}
+
+static void launch_about(void)
+{
+    if (about_win && about_win->active) return;
+    about_win = compositor_create_window("About nextOS", 280, 200, 250, 200);
+    if (!about_win) return;
+    about_win->on_paint = about_paint;
+    about_win->on_close = about_close;
 }
 
 /* ── Parse Multiboot2 info ────────────────────────────────────────────── */
@@ -359,6 +522,9 @@ static void launch_app_by_index(int index)
     case 0: settings_launch(); break;
     case 1: explorer_launch(); break;
     case 2: notepad_launch();  break;
+    case 3: launch_about();    break;
+    case 4: system_restart();  break;
+    case 5: system_shutdown(); break;
     }
 }
 
@@ -406,6 +572,12 @@ void kernel_main(uint64_t mb_info_addr)
         key_event_t kev;
         while (keyboard_poll(&kev)) {
             if (!installer_active && kev.pressed) {
+                /* Windows/Super key toggles start menu */
+                if (kev.scancode == KEY_SCANCODE_LWIN) {
+                    compositor_toggle_start_menu();
+                    continue;
+                }
+
                 compositor_handle_key(kev.ascii, kev.scancode, kev.pressed);
 
                 /* Ctrl+1/2/3 to launch apps */

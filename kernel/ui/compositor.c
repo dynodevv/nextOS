@@ -9,6 +9,7 @@
 #include "compositor.h"
 #include "../gfx/framebuffer.h"
 #include "../mem/heap.h"
+#include "../drivers/timer.h"
 
 /* ── Internal state ───────────────────────────────────────────────────── */
 static window_t windows[MAX_WINDOWS];
@@ -258,8 +259,13 @@ static const desktop_icon_t desktop_icons[] = {
 };
 #define DESKTOP_ICON_COUNT 3
 
-static void draw_desktop_icon(int x, int y, const desktop_icon_t *icon)
+static void draw_desktop_icon(int x, int y, const desktop_icon_t *icon, int selected)
 {
+    /* Selection highlight */
+    if (selected) {
+        fb_fill_rect(x - 4, y - 4, ICON_W + 8, ICON_H + 24,
+                     rgba_blend(0x4080C0, 0x000000, 80));
+    }
 
     /* Icon shadow */
     fb_fill_rect(x + 3, y + 3, ICON_W, ICON_H, rgba_blend(0x000000, 0x000000, 60));
@@ -281,10 +287,79 @@ static void draw_desktop_icon(int x, int y, const desktop_icon_t *icon)
     /* Border */
     fb_draw_rect(x, y, ICON_W, ICON_H, 0x303030);
 
-    /* Inner icon glyph (first letter of label, large) */
-    int lx = x + (ICON_W - 8) / 2;
-    int ly = y + (ICON_H - 16) / 2;
-    fb_draw_char(lx, ly, icon->label[0], 0xFFFFFF, 0x00000000);
+    /* Draw icon-specific pixel art glyph */
+    int cx = x + ICON_W / 2;
+    int cy = y + ICON_H / 2;
+    int idx = 0;
+    while (idx < DESKTOP_ICON_COUNT && &desktop_icons[idx] != icon) idx++;
+    if (idx >= DESKTOP_ICON_COUNT) return;
+
+    if (idx == 0) {
+        /* Settings: gear/cog icon */
+        for (int dy = -20; dy <= 20; dy++) {
+            for (int dx = -20; dx <= 20; dx++) {
+                int r2 = dx * dx + dy * dy;
+                int is_body = (r2 >= 8 * 8 && r2 <= 16 * 16);
+                int is_hole = (r2 <= 5 * 5);
+                /* Teeth: 8 rectangular protrusions */
+                int is_tooth = 0;
+                int adx = dx < 0 ? -dx : dx;
+                int ady = dy < 0 ? -dy : dy;
+                if (r2 >= 14 * 14 && r2 <= 22 * 22) {
+                    /* Axis-aligned teeth */
+                    if ((adx <= 4 && ady <= 22) || (ady <= 4 && adx <= 22))
+                        is_tooth = 1;
+                    /* Diagonal teeth */
+                    int s = adx + ady;
+                    int d = adx - ady; if (d < 0) d = -d;
+                    if (s <= 30 && s >= 18 && d <= 6) is_tooth = 1;
+                }
+                if ((is_body || is_tooth) && !is_hole) {
+                    uint32_t gc = (r2 < 12 * 12) ? 0xD0D0D8 : 0xA0A0A8;
+                    fb_putpixel(cx + dx, cy + dy, gc);
+                }
+            }
+        }
+    } else if (idx == 1) {
+        /* Files: manila folder icon */
+        int fx = x + 10, fy = y + 14;
+        int fw = 44, fh = 34;
+        /* Folder tab */
+        fb_fill_rect(fx, fy, 18, 6, 0xE8C850);
+        fb_draw_rect(fx, fy, 18, 6, 0xC8A830);
+        /* Folder body */
+        fb_fill_rect(fx, fy + 6, fw, fh, 0xE8C850);
+        /* Fold shadow */
+        fb_fill_rect(fx, fy + 6, fw, 4, 0xC8A830);
+        /* Border */
+        fb_draw_rect(fx, fy + 6, fw, fh, 0x987020);
+        /* Inner highlight */
+        for (int col = fx + 1; col < fx + fw - 1; col++)
+            fb_putpixel(col, fy + 11, 0xF0D870);
+    } else if (idx == 2) {
+        /* Notepad: paper with lines icon */
+        int px = x + 14, py = y + 8;
+        int pw = 36, ph = 48;
+        /* Paper body */
+        fb_fill_rect(px, py, pw, ph, 0xFFF8C8);
+        /* Dog-ear */
+        for (int r = 0; r < 10; r++) {
+            for (int c = 0; c < 10 - r; c++) {
+                fb_putpixel(px + pw - 10 + c, py + r, 0xE0D8A0);
+            }
+        }
+        /* Ruled lines */
+        for (int ly = py + 10; ly < py + ph - 4; ly += 7) {
+            for (int lx = px + 2; lx < px + pw - 2; lx++)
+                fb_putpixel(lx, ly, 0xB0C0D8);
+        }
+        /* Red margin line */
+        for (int ly = py + 4; ly < py + ph - 2; ly++) {
+            fb_putpixel(px + 8, ly, 0xE05050);
+        }
+        /* Border */
+        fb_draw_rect(px, py, pw, ph, 0x808080);
+    }
 
     /* Label below icon */
     int label_len = str_len(icon->label);
@@ -295,12 +370,18 @@ static void draw_desktop_icon(int x, int y, const desktop_icon_t *icon)
     fb_draw_string(label_x, label_y, icon->label, 0xFFFFFF, 0x00000000);
 }
 
+/* ── Double-click and icon selection state ─────────────────────────────── */
+static int    selected_icon = -1;
+static uint64_t last_icon_click_tick = 0;
+static int    last_icon_click_idx = -1;
+#define DBLCLICK_MS 500
+
 static void draw_desktop_icons(void)
 {
     for (int i = 0; i < DESKTOP_ICON_COUNT; i++) {
         int x = ICON_START_X;
         int y = ICON_START_Y + i * (ICON_H + ICON_LABEL_GAP);
-        draw_desktop_icon(x, y, &desktop_icons[i]);
+        draw_desktop_icon(x, y, &desktop_icons[i], i == selected_icon);
     }
 }
 
@@ -310,10 +391,11 @@ static void draw_desktop_icons(void)
 /* ── Start menu ──────────────────────────────────────────────────────── */
 #define START_MENU_W 180
 #define START_MENU_ITEM_H 32
-#define START_MENU_ITEMS 3
+#define START_MENU_ITEMS 6
 
 static const char *start_menu_labels[START_MENU_ITEMS] = {
-    "Settings", "File Explorer", "Notepad"
+    "Settings", "File Explorer", "Notepad",
+    "About nextOS", "Restart", "Shutdown"
 };
 
 static void draw_start_menu(void)
@@ -322,7 +404,9 @@ static void draw_start_menu(void)
     framebuffer_t *f = fb_get();
     const theme_colors_t *tc = &themes[current_theme];
 
-    int mh = START_MENU_ITEMS * START_MENU_ITEM_H + 8;
+    /* Extra space for separator between item 2 and item 3 */
+    int separator_h = 6;
+    int mh = START_MENU_ITEMS * START_MENU_ITEM_H + 8 + separator_h;
     int mx = 4;
     int my = (int)f->height - TASKBAR_H - mh;
 
@@ -335,12 +419,25 @@ static void draw_start_menu(void)
     /* Items */
     for (int i = 0; i < START_MENU_ITEMS; i++) {
         int iy = my + 4 + i * START_MENU_ITEM_H;
+        if (i >= 3) iy += separator_h;  /* offset items after separator */
         fb_draw_string(mx + 12, iy + 8, start_menu_labels[i], 0x1A1A1A, 0x00000000);
-        /* Separator line */
-        if (i < START_MENU_ITEMS - 1) {
+        /* Separator line between items (but not after last) */
+        if (i < START_MENU_ITEMS - 1 && i != 2) {
             for (int sx = mx + 4; sx < mx + START_MENU_W - 4; sx++)
                 fb_putpixel(sx, iy + START_MENU_ITEM_H - 1,
                             rgba_blend(fb_getpixel(sx, iy + START_MENU_ITEM_H - 1), 0x000000, 30));
+        }
+    }
+
+    /* Draw thicker separator line between Notepad and About */
+    {
+        int sep_y = my + 4 + 3 * START_MENU_ITEM_H;
+        for (int row = 0; row < separator_h; row++) {
+            for (int sx = mx + 4; sx < mx + START_MENU_W - 4; sx++) {
+                if (row == separator_h / 2)
+                    fb_putpixel(sx, sep_y + row,
+                                rgba_blend(fb_getpixel(sx, sep_y + row), 0x000000, 60));
+            }
         }
     }
 }
@@ -400,7 +497,7 @@ static const uint8_t cursor_bitmap[20][16] = {
     {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
 };
 
-static void draw_cursor(int mx, int my)
+void compositor_draw_cursor(int mx, int my)
 {
     /* Shadow (offset +2,+2) */
     for (int r = 0; r < 20; r++) {
@@ -458,6 +555,7 @@ window_t *compositor_create_window(const char *title, int x, int y, int w, int h
             windows[i].on_paint = (void *)0;
             windows[i].on_key   = (void *)0;
             windows[i].on_mouse = (void *)0;
+            windows[i].on_close = (void *)0;
             str_cpy(windows[i].title, title);
 
             int cw = w - BORDER_W * 2;
@@ -483,6 +581,7 @@ window_t *compositor_create_window(const char *title, int x, int y, int w, int h
 void compositor_destroy_window(window_t *win)
 {
     if (!win) return;
+    if (win->on_close) win->on_close(win);
     if (win->canvas) kfree(win->canvas);
     win->active = 0;
     window_count--;
@@ -533,7 +632,7 @@ void compositor_handle_mouse(int mx, int my, int buttons)
             w->x = mx - w->drag_ox;
             w->y = my - w->drag_oy;
             if (release) w->dragging = 0;
-            draw_cursor(mx, my);
+            compositor_draw_cursor(mx, my);
             return;
         }
     }
@@ -545,43 +644,70 @@ void compositor_handle_mouse(int mx, int my, int buttons)
         int tb_y = (int)f->height - TASKBAR_H;
         if (mx >= 4 && mx < 84 && my >= tb_y + 4 && my < tb_y + TASKBAR_H - 4) {
             start_menu_open = !start_menu_open;
-            draw_cursor(mx, my);
+            compositor_draw_cursor(mx, my);
             return;
         }
 
         /* Start menu item hit test */
         if (start_menu_open) {
-            int mh = START_MENU_ITEMS * START_MENU_ITEM_H + 8;
+            int separator_h = 6;
+            int mh = START_MENU_ITEMS * START_MENU_ITEM_H + 8 + separator_h;
             int menu_x = 4;
             int menu_y = (int)f->height - TASKBAR_H - mh;
             if (mx >= menu_x && mx < menu_x + START_MENU_W &&
                 my >= menu_y && my < menu_y + mh) {
-                int item = (my - menu_y - 4) / START_MENU_ITEM_H;
+                /* Determine which item was clicked, accounting for separator */
+                int rel_y = my - menu_y - 4;
+                int item;
+                /* Items 0-2 are at their normal positions */
+                /* Items 3-5 are shifted down by separator_h */
+                if (rel_y < 3 * START_MENU_ITEM_H) {
+                    item = rel_y / START_MENU_ITEM_H;
+                } else if (rel_y < 3 * START_MENU_ITEM_H + separator_h) {
+                    item = -1;  /* clicked on separator */
+                } else {
+                    item = 3 + (rel_y - 3 * START_MENU_ITEM_H - separator_h) / START_MENU_ITEM_H;
+                }
                 if (item >= 0 && item < START_MENU_ITEMS) {
                     start_menu_open = 0;
                     /* Launch the selected app via callback */
                     if (start_menu_callback)
                         start_menu_callback(item);
                 }
-                draw_cursor(mx, my);
+                compositor_draw_cursor(mx, my);
                 return;
             }
             /* Click outside menu closes it */
             start_menu_open = 0;
         }
 
-        /* Desktop icon hit test */
+        /* Desktop icon hit test (double-click to open, single click to select) */
         for (int i = 0; i < DESKTOP_ICON_COUNT; i++) {
             int ix = ICON_START_X;
             int iy = ICON_START_Y + i * (ICON_H + ICON_LABEL_GAP);
-            if (mx >= ix && mx < ix + ICON_W &&
-                my >= iy && my < iy + ICON_H) {
-                if (start_menu_callback)
-                    start_menu_callback(i);
-                draw_cursor(mx, my);
+            if (mx >= ix - 4 && mx < ix + ICON_W + 4 &&
+                my >= iy - 4 && my < iy + ICON_H + 24) {
+                uint64_t now = timer_get_ticks();
+                if (last_icon_click_idx == i &&
+                    (now - last_icon_click_tick) < DBLCLICK_MS) {
+                    /* Double-click: launch app */
+                    selected_icon = -1;
+                    last_icon_click_idx = -1;
+                    if (start_menu_callback)
+                        start_menu_callback(i);
+                } else {
+                    /* Single click: select */
+                    selected_icon = i;
+                    last_icon_click_tick = now;
+                    last_icon_click_idx = i;
+                }
+                compositor_draw_cursor(mx, my);
                 return;
             }
         }
+
+        /* Click on empty desktop deselects icons */
+        selected_icon = -1;
 
         /* Check window title bars for drag / close / focus */
         for (int i = MAX_WINDOWS - 1; i >= 0; i--) {
@@ -593,7 +719,7 @@ void compositor_handle_mouse(int mx, int my, int buttons)
             int cby = w->y + 6;
             if (mx >= cbx && mx < cbx + 16 && my >= cby && my < cby + 16) {
                 compositor_destroy_window(w);
-                draw_cursor(mx, my);
+                compositor_draw_cursor(mx, my);
                 return;
             }
 
@@ -608,7 +734,7 @@ void compositor_handle_mouse(int mx, int my, int buttons)
                 for (int j = 0; j < MAX_WINDOWS; j++)
                     windows[j].focused = 0;
                 w->focused = 1;
-                draw_cursor(mx, my);
+                compositor_draw_cursor(mx, my);
                 return;
             }
 
@@ -624,7 +750,7 @@ void compositor_handle_mouse(int mx, int my, int buttons)
                     int ly = my - w->y - TITLEBAR_H - BORDER_W;
                     w->on_mouse(w, lx, ly, buttons);
                 }
-                draw_cursor(mx, my);
+                compositor_draw_cursor(mx, my);
                 return;
             }
         }
@@ -640,7 +766,7 @@ void compositor_handle_mouse(int mx, int my, int buttons)
     }
 
     /* Draw cursor last */
-    draw_cursor(mx, my);
+    compositor_draw_cursor(mx, my);
 }
 
 void compositor_set_app_launcher(void (*callback)(int item))
@@ -657,4 +783,9 @@ void compositor_handle_key(char ascii, int scancode, int pressed)
             return;
         }
     }
+}
+
+void compositor_toggle_start_menu(void)
+{
+    start_menu_open = !start_menu_open;
 }

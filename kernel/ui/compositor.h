@@ -35,6 +35,7 @@ struct window_s {
     void (*on_paint)(window_t *self);
     void (*on_key)(window_t *self, char ascii, int scancode, int pressed);
     void (*on_mouse)(window_t *self, int mx, int my, int buttons);
+    void (*on_close)(window_t *self);
 };
 
 /* ── Public API ───────────────────────────────────────────────────────── */
@@ -47,6 +48,8 @@ void      compositor_render_frame(void);
 void      compositor_handle_mouse(int mx, int my, int buttons);
 void      compositor_handle_key(char ascii, int scancode, int pressed);
 void      compositor_set_app_launcher(void (*callback)(int item));
+void      compositor_toggle_start_menu(void);
+void      compositor_draw_cursor(int x, int y);
 
 /* Desktop */
 void      desktop_draw_wallpaper(void);

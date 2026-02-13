@@ -410,6 +410,13 @@ static void notepad_key(window_t *win, char ascii, int scancode, int pressed)
     }
 }
 
+/* ── Close callback ────────────────────────────────────────────────────── */
+static void notepad_close(window_t *win)
+{
+    (void)win;
+    notepad_win = (void *)0;
+}
+
 /* ── Public: launch notepad ───────────────────────────────────────────── */
 void notepad_launch(void)
 {
@@ -426,4 +433,5 @@ void notepad_launch(void)
     notepad_win->on_paint = notepad_paint;
     notepad_win->on_mouse = notepad_mouse;
     notepad_win->on_key   = notepad_key;
+    notepad_win->on_close = notepad_close;
 }

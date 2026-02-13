@@ -277,7 +277,7 @@ static void settings_mouse(window_t *win, int mx, int my, int buttons)
     /* Display tab clicks */
     if (current_tab == TAB_DISPLAY) {
         for (int i = 0; i < RES_COUNT; i++) {
-            int by = 80 + i * 36 - 32; /* adjusted for tab area offset */
+            int by = 80 + i * 36;
             if (mx >= 20 && mx < 220 && my >= by && my < by + 28) {
                 resolution_index = i;
                 /* TODO: Actually change framebuffer mode via BIOS int 10h
@@ -290,7 +290,7 @@ static void settings_mouse(window_t *win, int mx, int my, int buttons)
     /* Theme tab clicks */
     if (current_tab == TAB_THEME) {
         for (int i = 0; i < 2; i++) {
-            int by = 80 + i * 40 - 32;
+            int by = 80 + i * 40;
             if (mx >= 20 && mx < 260 && my >= by && my < by + 32) {
                 theme_index = i;
                 compositor_set_theme((theme_t)i);
@@ -304,7 +304,7 @@ static void settings_mouse(window_t *win, int mx, int my, int buttons)
         for (int vi = 0; vi < KB_VISIBLE_ROWS; vi++) {
             int li = kb_scroll_offset + vi;
             if (li >= KB_LAYOUT_COUNT) break;
-            int by = 80 + vi * 30 - 32;
+            int by = 80 + vi * 30;
             if (mx >= 20 && mx < 300 && my >= by && my < by + 24) {
                 kb_layout_index = li;
                 keyboard_set_layout((kb_layout_t)li);
@@ -329,6 +329,13 @@ static void settings_key(window_t *win, char ascii, int scancode, int pressed)
     /* Could handle keyboard shortcuts here */
 }
 
+/* ── Close callback ────────────────────────────────────────────────────── */
+static void settings_close(window_t *win)
+{
+    (void)win;
+    settings_win = (void *)0;
+}
+
 /* ── Public: launch settings ──────────────────────────────────────────── */
 void settings_launch(void)
 {
@@ -341,4 +348,5 @@ void settings_launch(void)
     settings_win->on_paint = settings_paint;
     settings_win->on_mouse = settings_mouse;
     settings_win->on_key   = settings_key;
+    settings_win->on_close = settings_close;
 }

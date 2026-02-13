@@ -16,6 +16,7 @@ static int shift_held = 0;
 static int ctrl_held  = 0;
 static int alt_held   = 0;
 static int caps_lock  = 0;
+static int e0_prefix  = 0;
 
 /* ── Current layout ───────────────────────────────────────────────────── */
 static kb_layout_t current_layout = KB_LAYOUT_US;
@@ -191,6 +192,16 @@ static void keyboard_irq(uint64_t irq, uint64_t err)
 {
     (void)irq; (void)err;
     uint8_t sc = inb(0x60);
+
+    /* Handle E0 prefix for extended scancodes */
+    if (sc == 0xE0) {
+        e0_prefix = 1;
+        return;
+    }
+
+    int is_extended = e0_prefix;
+    e0_prefix = 0;
+
     int released = sc & 0x80;
     uint8_t code = sc & 0x7F;
 
@@ -206,7 +217,13 @@ static void keyboard_irq(uint64_t irq, uint64_t err)
     ev.shift    = shift_held;
     ev.ctrl     = ctrl_held;
     ev.alt      = alt_held;
-    ev.ascii    = released ? 0 : translate_scancode(code, shift_held);
+
+    /* Extended scancodes (Win key, etc.) produce no ASCII */
+    if (is_extended) {
+        ev.ascii = 0;
+    } else {
+        ev.ascii = released ? 0 : translate_scancode(code, shift_held);
+    }
 
     int next = (kb_write_idx + 1) % KEY_BUF_SIZE;
     if (next != kb_read_idx) {
