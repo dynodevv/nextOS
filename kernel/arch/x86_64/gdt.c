@@ -31,11 +31,11 @@ void gdt_init(void)
     /* Kernel Code 64-bit : selector 0x08 */
     gdt_set_gate(1, 0, 0xFFFFF, 0x9A, 0xA0);
     /* Kernel Data 64-bit : selector 0x10 */
-    gdt_set_gate(2, 0, 0xFFFFF, 0x92, 0xA0);
+    gdt_set_gate(2, 0, 0xFFFFF, 0x92, 0xC0);
     /* User Code 64-bit   : selector 0x18 */
     gdt_set_gate(3, 0, 0xFFFFF, 0xFA, 0xA0);
     /* User Data 64-bit   : selector 0x20 */
-    gdt_set_gate(4, 0, 0xFFFFF, 0xF2, 0xA0);
+    gdt_set_gate(4, 0, 0xFFFFF, 0xF2, 0xC0);
 
     /* TSS descriptor (occupies two GDT slots: 5 & 6) */
     uint64_t tss_base = (uint64_t)&tss;

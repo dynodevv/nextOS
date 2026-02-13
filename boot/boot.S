@@ -42,12 +42,12 @@ stack_bottom:
     .skip 65536                /* 64 KiB bootstrap stack */
 stack_top:
 
-/* ── Initial Page Tables (identity-map first 2 GiB) ───────────────────── */
+/* ── Initial Page Tables (identity-map first 4 GiB) ───────────────────── */
 .section .bss
 .align 4096
 boot_pml4:  .skip 4096
 boot_pdpt:  .skip 4096
-boot_pd:    .skip 4096
+boot_pd:    .skip 4096 * 4         /* 4 page directories covering 4 GiB */
 
 /* ── 32-bit Entry Point ───────────────────────────────────────────────── */
 .section .text
@@ -64,12 +64,22 @@ _start:
     orl  $0x03, %eax           /* present + writable */
     movl %eax, boot_pml4
 
-    /* PDPT[0] -> PD */
+    /* PDPT[0..3] -> boot_pd + 0*4096 .. boot_pd + 3*4096 */
+    movl $boot_pdpt, %edx
     movl $boot_pd, %eax
-    orl  $0x03, %eax
-    movl %eax, boot_pdpt
+    movl $0, %ecx
+.fill_pdpt:
+    movl %eax, %esi
+    orl  $0x03, %esi           /* present + writable */
+    movl %esi, (%edx)
+    movl $0,   4(%edx)
+    addl $4096, %eax
+    addl $8, %edx
+    incl %ecx
+    cmpl $4, %ecx
+    jne  .fill_pdpt
 
-    /* PD: map 512 x 2 MiB pages (1 GiB identity map) */
+    /* PD: map 2048 x 2 MiB pages (4 GiB identity map) */
     movl $0, %ecx
     movl $boot_pd, %ebx
 .fill_pd:
@@ -80,7 +90,7 @@ _start:
     movl $0,   4(%ebx)
     addl $8, %ebx
     incl %ecx
-    cmpl $512, %ecx
+    cmpl $2048, %ecx
     jne  .fill_pd
 
     /* ── Enable PAE ── */
@@ -121,8 +131,18 @@ long_mode_entry:
     /* Set up stack */
     movq $stack_top, %rsp
 
-    /* edi already has multiboot info pointer from 32-bit code */
-    /* Sign-extend to rdi for System V ABI */
+    /* Enable SSE — GCC -O2 emits SSE instructions (pxor, movaps, etc.)
+     * Without this, any SSE opcode triggers #UD → triple fault. */
+    movq %cr0, %rax
+    andq $0xFFFFFFFFFFFFFFFB, %rax  /* clear CR0.EM (bit 2) */
+    orq  $0x0002, %rax              /* set   CR0.MP (bit 1) */
+    movq %rax, %cr0
+
+    movq %cr4, %rax
+    orq  $0x0600, %rax              /* set CR4.OSFXSR (bit 9) + OSXMMEXCPT (bit 10) */
+    movq %rax, %cr4
+
+    /* movl zero-extends edi to rdi per x86-64 behavior */
     movl %edi, %edi
 
     /* Call the C kernel main */
