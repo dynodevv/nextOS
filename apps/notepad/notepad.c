@@ -8,10 +8,10 @@
  *   - Visual design: ruled yellow paper with red margin line
  */
 #include "notepad.h"
-#include "../ui/compositor.h"
-#include "../gfx/framebuffer.h"
-#include "../fs/vfs.h"
-#include "../mem/heap.h"
+#include "kernel/ui/compositor.h"
+#include "kernel/gfx/framebuffer.h"
+#include "kernel/fs/vfs.h"
+#include "kernel/mem/heap.h"
 
 /* ── Text buffer ──────────────────────────────────────────────────────── */
 #define TEXT_MAX    8192
@@ -75,16 +75,6 @@ static void draw_gradient(uint32_t *c, int cw, int ch,
             c[py * cw + col] = color;
         }
     }
-}
-
-/* Count lines up to position */
-static int count_lines_to(int pos)
-{
-    int lines = 0;
-    for (int i = 0; i < pos; i++) {
-        if (text_buf[i] == '\n') lines++;
-    }
-    return lines;
 }
 
 /* Get column of cursor on its current line */
@@ -380,7 +370,7 @@ void notepad_launch(void)
     notepad_win = compositor_create_window("Notepad", 200, 100, 500, 400);
     if (!notepad_win) return;
 
-    notepad_win->on_paint = (void (*)(struct window *))notepad_paint;
-    notepad_win->on_mouse = (void (*)(struct window *, int, int, int))notepad_mouse;
-    notepad_win->on_key   = (void (*)(struct window *, char, int, int))notepad_key;
+    notepad_win->on_paint = notepad_paint;
+    notepad_win->on_mouse = notepad_mouse;
+    notepad_win->on_key   = notepad_key;
 }

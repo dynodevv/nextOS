@@ -6,10 +6,10 @@
  * Supports directory navigation, file execution, and properties view.
  */
 #include "explorer.h"
-#include "../ui/compositor.h"
-#include "../gfx/framebuffer.h"
-#include "../fs/vfs.h"
-#include "../mem/heap.h"
+#include "kernel/ui/compositor.h"
+#include "kernel/gfx/framebuffer.h"
+#include "kernel/fs/vfs.h"
+#include "kernel/mem/heap.h"
 
 /* ── State ────────────────────────────────────────────────────────────── */
 #define MAX_ENTRIES  128
@@ -43,18 +43,10 @@ static char        current_path[PATH_MAX_LEN] = "/";
 
 /* ── Helpers ──────────────────────────────────────────────────────────── */
 static int str_len(const char *s) { int n = 0; while (s[n]) n++; return n; }
-static void str_cpy(char *d, const char *s) {
-    while (*s) *d++ = *s++;
-    *d = 0;
-}
 static void str_cat(char *d, const char *s) {
     while (*d) d++;
     while (*s) *d++ = *s++;
     *d = 0;
-}
-static int str_cmp(const char *a, const char *b) {
-    while (*a && *a == *b) { a++; b++; }
-    return *(unsigned char *)a - *(unsigned char *)b;
 }
 
 static void fill_rect(uint32_t *canvas, int cw, int ch,
@@ -168,7 +160,7 @@ static void explorer_paint(window_t *win)
 
         int ey = list_y + vi * ENTRY_HEIGHT;
         uint32_t bg = (ei == selected_index) ? COL_SELECTED_BG : 0x00000000;
-        uint32_t fg = (ei == selected_index) ? COL_TEXT_SEL : COL_TEXT;
+        (void)(ei == selected_index ? COL_TEXT_SEL : COL_TEXT); /* fg used by text overlay */
 
         if (bg) fill_rect(win->canvas, cw, ch, 0, ey, cw - 16, ENTRY_HEIGHT, bg);
 
@@ -285,7 +277,7 @@ void explorer_launch(void)
     explorer_win = compositor_create_window("File Explorer", 150, 80, 450, 380);
     if (!explorer_win) return;
 
-    explorer_win->on_paint = (void (*)(struct window *))explorer_paint;
-    explorer_win->on_mouse = (void (*)(struct window *, int, int, int))explorer_mouse;
-    explorer_win->on_key   = (void (*)(struct window *, char, int, int))explorer_key;
+    explorer_win->on_paint = explorer_paint;
+    explorer_win->on_mouse = explorer_mouse;
+    explorer_win->on_key   = explorer_key;
 }

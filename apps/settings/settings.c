@@ -10,10 +10,10 @@
  *   - All state persists for the session
  */
 #include "settings.h"
-#include "../ui/compositor.h"
-#include "../gfx/framebuffer.h"
-#include "../drivers/keyboard.h"
-#include "../mem/heap.h"
+#include "kernel/ui/compositor.h"
+#include "kernel/gfx/framebuffer.h"
+#include "kernel/drivers/keyboard.h"
+#include "kernel/mem/heap.h"
 
 /* ── Tab identifiers ──────────────────────────────────────────────────── */
 typedef enum { TAB_DISPLAY = 0, TAB_THEME, TAB_KEYBOARD, TAB_COUNT } tab_t;
@@ -94,7 +94,7 @@ static void draw_canvas_string(uint32_t *canvas, int cw, int ch,
                                int x, int y, const char *s,
                                uint32_t fg, uint32_t bg)
 {
-    (void)ch;
+    (void)ch; (void)fg;
     /* We write to the canvas, which the compositor blits later.
      * For simplicity, we use the framebuffer font renderer indirectly
      * by writing colored rectangles. Here we do a simple 8x16 draw. */
@@ -118,10 +118,6 @@ static void draw_canvas_string(uint32_t *canvas, int cw, int ch,
         s++;
     }
 }
-
-static void draw_canvas_text_direct(uint32_t *canvas, int cw, int ch,
-                                    int x, int y, const char *s,
-                                    uint32_t fg, uint32_t bg);
 
 /* Minimal built-in font render directly into canvas */
 extern const uint8_t font_8x16[95][16]; /* defined in framebuffer.c — not static */
@@ -330,7 +326,7 @@ void settings_launch(void)
     settings_win = compositor_create_window("Settings", 100, 60, 380, 340);
     if (!settings_win) return;
 
-    settings_win->on_paint = (void (*)(struct window *))settings_paint;
-    settings_win->on_mouse = (void (*)(struct window *, int, int, int))settings_mouse;
-    settings_win->on_key   = (void (*)(struct window *, char, int, int))settings_key;
+    settings_win->on_paint = settings_paint;
+    settings_win->on_mouse = settings_mouse;
+    settings_win->on_key   = settings_key;
 }

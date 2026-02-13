@@ -16,13 +16,6 @@ static int vfs_strcmp(const char *a, const char *b)
     return *(unsigned char *)a - *(unsigned char *)b;
 }
 
-static int vfs_strlen(const char *s)
-{
-    int n = 0;
-    while (s[n]) n++;
-    return n;
-}
-
 static void vfs_strcpy(char *dst, const char *src)
 {
     while ((*dst++ = *src++));

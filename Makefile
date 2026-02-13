@@ -8,10 +8,12 @@ CC      := gcc
 AS      := nasm
 LD      := ld
 
-CFLAGS  := -ffreestanding -nostdlib -nostdinc -fno-builtin -fno-stack-protector \
+GCC_INCDIR := $(shell $(CC) -print-file-name=include)
+CFLAGS  := -ffreestanding -nostdlib -nostdinc -isystem $(GCC_INCDIR) \
+           -fno-builtin -fno-stack-protector \
            -mno-red-zone -m64 -Wall -Wextra -O2 -mcmodel=kernel \
-           -fno-pie -fno-pic
-LDFLAGS := -n -T linker.ld -nostdlib
+           -fno-pie -fno-pic -I.
+LDFLAGS := -n -T linker.ld -nostdlib -z noexecstack
 ASFLAGS := -f elf64
 
 # ── Sources ──────────────────────────────────────────────────────────────────

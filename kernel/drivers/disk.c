@@ -66,14 +66,18 @@ static int ata_identify(disk_device_t *dev)
     ata_wait_drq(io);
 
     uint16_t ident[256];
+    for (int i = 0; i < 256; i++) ident[i] = 0;
     for (int i = 0; i < 256; i++) {
         ident[i] = inw(io + ATA_REG_DATA);
     }
 
     /* LBA48 total sectors at words 100-103 */
-    dev->total_sectors = *(uint64_t *)&ident[100];
+    uint64_t lba48 = 0;
+    for (int i = 0; i < 4; i++)
+        lba48 |= (uint64_t)ident[100 + i] << (16 * i);
+    dev->total_sectors = lba48;
     if (dev->total_sectors == 0) {
-        dev->total_sectors = *(uint32_t *)&ident[60];
+        dev->total_sectors = (uint32_t)ident[60] | ((uint32_t)ident[61] << 16);
     }
 
     dev->present = 1;

@@ -18,7 +18,8 @@ typedef enum {
 #define MAX_WINDOWS 16
 #define WIN_TITLE_LEN 64
 
-typedef struct {
+typedef struct window_s window_t;
+struct window_s {
     int      active;
     int      x, y;
     int      width, height;
@@ -31,10 +32,10 @@ typedef struct {
     int      close_hover;
 
     /* Callback: called each frame so the app can draw into canvas */
-    void (*on_paint)(struct window *self);
-    void (*on_key)(struct window *self, char ascii, int scancode, int pressed);
-    void (*on_mouse)(struct window *self, int mx, int my, int buttons);
-} window_t;
+    void (*on_paint)(window_t *self);
+    void (*on_key)(window_t *self, char ascii, int scancode, int pressed);
+    void (*on_mouse)(window_t *self, int mx, int my, int buttons);
+};
 
 /* ── Public API ───────────────────────────────────────────────────────── */
 void      compositor_init(void);

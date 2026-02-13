@@ -11,7 +11,7 @@ static framebuffer_t fb;
 /* Minimal bitmapped font — each character is 8 pixels wide, 16 rows tall.
  * Stored as 16 bytes per glyph (one byte per row, MSB = leftmost pixel).
  * Only printable ASCII subset is defined here. */
-static const uint8_t font_8x16[95][16] = {
+const uint8_t font_8x16[95][16] = {
     /* ' ' (space) */
     {0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
      0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00},

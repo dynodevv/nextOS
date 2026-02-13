@@ -37,6 +37,8 @@ SECTIONS
         *(.bss .bss.*)
     }
 
+    _end = .;
+
     /DISCARD/ :
     {
         *(.comment)
