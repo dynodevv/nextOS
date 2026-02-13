@@ -66,7 +66,13 @@ static int install_progress = 0;
 static int install_disk_found = 0;
 static uint64_t install_disk_sectors = 0;
 
-static void write_mbr_to_disk(void); /* forward declaration */
+/* Magic marker written to disk sector 1 to indicate installation complete */
+#define INSTALL_MARKER_SECTOR 1
+#define INSTALL_MAGIC_0 0x6E785F4F  /* "nxOS" */
+#define INSTALL_MAGIC_1 0x494E5354  /* "INST" */
+
+static void write_install_marker(void);
+static int  check_install_marker(void);
 
 /* ── Draw a cursor arrow (used on the installer screen) ───────────────── */
 /* Now uses the same bitmap cursor as the desktop compositor */
@@ -290,10 +296,10 @@ static void handle_installer_input(void)
             install_progress = 0;
         }
     } else if (installer_step == 2) {
-        /* Progress auto-advances; write MBR at the right moment */
+        /* Progress auto-advances; write install marker at the right moment */
         install_progress++;
         if (install_progress == 50 && install_disk_found) {
-            write_mbr_to_disk();
+            write_install_marker();
         }
         if (install_progress > 100) {
             installer_step = 3;
@@ -308,63 +314,49 @@ static void handle_installer_input(void)
     }
 }
 
-/* ── MBR boot record for disk installation ────────────────────────────── */
+/* ── Installation marker on disk ───────────────────────────────────────── */
 /*
- * Minimal x86 real-mode MBR that prints a message and reboots on keypress.
- * Hand-assembled 16-bit code loaded at 0x7C00 by BIOS:
- *   cli; xor ax,ax; mov ds/es/ss,ax; mov sp,0x7C00; sti
- *   mov si, msg; lodsb; test al,al; jz done
- *   mov ah,0x0E; mov bx,7; int 0x10; jmp loop
- *   done: xor ah,ah; int 0x16; int 0x19; jmp $
+ * Instead of trying to make the disk independently bootable (which would
+ * require installing GRUB to disk), we write a magic marker to sector 1.
+ * On subsequent boots from the ISO, the kernel checks for this marker
+ * and skips the installer, going directly to the desktop.
  */
-static void write_mbr_to_disk(void)
+static void write_install_marker(void)
 {
     disk_device_t *disk = disk_get_primary();
     if (!disk) return;
 
-    static uint8_t mbr[512];
-    /* Zero the sector */
-    for (int i = 0; i < 512; i++) mbr[i] = 0;
+    static uint8_t marker_sector[512];
+    for (int i = 0; i < 512; i++) marker_sector[i] = 0;
 
-    /* Boot code */
-    static const uint8_t code[] = {
-        0xFA,                       /*  0: cli                    */
-        0x31, 0xC0,                 /*  1: xor ax, ax             */
-        0x8E, 0xD8,                 /*  3: mov ds, ax             */
-        0x8E, 0xC0,                 /*  5: mov es, ax             */
-        0x8E, 0xD0,                 /*  7: mov ss, ax             */
-        0xBC, 0x00, 0x7C,           /*  9: mov sp, 0x7C00         */
-        0xFB,                       /* 12: sti                    */
-        0xBE, 0x26, 0x7C,           /* 13: mov si, 0x7C26 (msg)  */
-        /* print_loop: */
-        0xAC,                       /* 16: lodsb                  */
-        0x84, 0xC0,                 /* 17: test al, al            */
-        0x74, 0x09,                 /* 19: jz done (-> 30)        */
-        0xB4, 0x0E,                 /* 21: mov ah, 0x0E           */
-        0xBB, 0x07, 0x00,           /* 23: mov bx, 0x0007         */
-        0xCD, 0x10,                 /* 26: int 0x10               */
-        0xEB, 0xF2,                 /* 28: jmp print_loop (-> 16) */
-        /* done: */
-        0xB4, 0x00,                 /* 30: mov ah, 0              */
-        0xCD, 0x16,                 /* 32: int 0x16               */
-        0xCD, 0x19,                 /* 34: int 0x19               */
-        0xEB, 0xFE,                 /* 36: jmp $ (halt)           */
-    };
-    for (int i = 0; i < (int)sizeof(code); i++) mbr[i] = code[i];
+    /* Write magic values at the start */
+    marker_sector[0] = (INSTALL_MAGIC_0      ) & 0xFF;
+    marker_sector[1] = (INSTALL_MAGIC_0 >>  8) & 0xFF;
+    marker_sector[2] = (INSTALL_MAGIC_0 >> 16) & 0xFF;
+    marker_sector[3] = (INSTALL_MAGIC_0 >> 24) & 0xFF;
+    marker_sector[4] = (INSTALL_MAGIC_1      ) & 0xFF;
+    marker_sector[5] = (INSTALL_MAGIC_1 >>  8) & 0xFF;
+    marker_sector[6] = (INSTALL_MAGIC_1 >> 16) & 0xFF;
+    marker_sector[7] = (INSTALL_MAGIC_1 >> 24) & 0xFF;
 
-    /* Message at offset 0x26 (38) */
-    static const char msg[] =
-        "nextOS installed successfully.\r\n"
-        "Boot from CD/USB to start nextOS.\r\n"
-        "Press any key to reboot...\r\n";
-    for (int i = 0; msg[i] && (38 + i) < 510; i++)
-        mbr[38 + i] = (uint8_t)msg[i];
+    disk_write(disk, INSTALL_MARKER_SECTOR, 1, marker_sector);
+}
 
-    /* Boot signature at offset 510-511 */
-    mbr[510] = 0x55;
-    mbr[511] = 0xAA;
+static int check_install_marker(void)
+{
+    disk_device_t *disk = disk_get_primary();
+    if (!disk) return 0;
 
-    disk_write(disk, 0, 1, mbr);
+    static uint8_t buf[512];
+    if (disk_read(disk, INSTALL_MARKER_SECTOR, 1, buf) < 0)
+        return 0;
+
+    uint32_t m0 = (uint32_t)buf[0] | ((uint32_t)buf[1] << 8) |
+                  ((uint32_t)buf[2] << 16) | ((uint32_t)buf[3] << 24);
+    uint32_t m1 = (uint32_t)buf[4] | ((uint32_t)buf[5] << 8) |
+                  ((uint32_t)buf[6] << 16) | ((uint32_t)buf[7] << 24);
+
+    return (m0 == INSTALL_MAGIC_0 && m1 == INSTALL_MAGIC_1);
 }
 
 /* ── System actions (shutdown, restart, about window) ─────────────────── */
@@ -418,20 +410,57 @@ static void about_paint(window_t *win)
             win->canvas[row * cw + col] = c;
     }
 
+    /* "N" Logo (20px tall, 20px wide) */
+    {
+        uint32_t lc = 0x3060B0;
+        int lx = (cw - 20) / 2, ly = 12;
+        #define LOGO_H     20
+        #define LOGO_W     20
+        #define LOGO_STROKE 3
+        /* Left vertical */
+        for (int r = 0; r < LOGO_H; r++) {
+            if (ly + r < ch) {
+                win->canvas[(ly + r) * cw + lx] = lc;
+                win->canvas[(ly + r) * cw + lx + 1] = lc;
+                win->canvas[(ly + r) * cw + lx + 2] = lc;
+            }
+        }
+        /* Right vertical */
+        for (int r = 0; r < LOGO_H; r++) {
+            if (ly + r < ch && lx + LOGO_W - LOGO_STROKE < cw) {
+                win->canvas[(ly + r) * cw + lx + LOGO_W - 3] = lc;
+                win->canvas[(ly + r) * cw + lx + LOGO_W - 2] = lc;
+                win->canvas[(ly + r) * cw + lx + LOGO_W - 1] = lc;
+            }
+        }
+        /* Diagonal (spans from left stroke to right stroke) */
+        int diag_span = LOGO_W - 2 * LOGO_STROKE; /* horizontal distance */
+        for (int r = 0; r < LOGO_H; r++) {
+            int c = r * diag_span / (LOGO_H - 1);
+            if (ly + r < ch && lx + LOGO_STROKE + c < cw) {
+                win->canvas[(ly + r) * cw + lx + LOGO_STROKE + c] = lc;
+                win->canvas[(ly + r) * cw + lx + LOGO_STROKE + c + 1] = lc;
+            }
+        }
+        #undef LOGO_H
+        #undef LOGO_W
+        #undef LOGO_STROKE
+    }
+
     /* Title */
     extern const uint8_t font_8x16[95][16];
     const char *title = "nextOS";
-    int tx = (cw - 6 * 8) / 2;
+    int ntx = (cw - 6 * 8) / 2;
     for (int i = 0; title[i]; i++) {
         if (title[i] < 32 || title[i] > 126) continue;
         const uint8_t *glyph = font_8x16[title[i] - 32];
         for (int row = 0; row < 16; row++) {
-            int py = 20 + row;
+            int py = 38 + row;
             if (py >= ch) continue;
             uint8_t bits = glyph[row];
             for (int col = 0; col < 8; col++) {
                 if (bits & (0x80 >> col)) {
-                    int px = tx + i * 8 + col;
+                    int px = ntx + i * 8 + col;
                     if (px >= 0 && px < cw)
                         win->canvas[py * cw + px] = 0x1A1A2A;
                 }
@@ -450,7 +479,7 @@ static void about_paint(window_t *win)
     };
     for (int l = 0; l < 6; l++) {
         const char *s = lines[l];
-        int sy = 50 + l * 18;
+        int sy = 64 + l * 18;
         for (int i = 0; s[i] && s[i] >= 32 && s[i] <= 126; i++) {
             const uint8_t *glyph = font_8x16[s[i] - 32];
             for (int row = 0; row < 16; row++) {
@@ -559,6 +588,11 @@ void kernel_main(uint64_t mb_info_addr)
 
     /* 6. Filesystem */
     vfs_init();
+
+    /* 6.5 Check if already installed (marker on disk) */
+    if (check_install_marker()) {
+        installer_active = 0;
+    }
 
     /* 7. Compositor */
     compositor_init();

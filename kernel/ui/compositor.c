@@ -160,6 +160,16 @@ static void str_cpy(char *d, const char *s)
 #define TITLEBAR_H 28
 #define BORDER_W   2
 
+static void draw_titlebar_circle(int cx, int cy, int r, uint32_t color)
+{
+    for (int dy = -r; dy <= r; dy++) {
+        for (int dx = -r; dx <= r; dx++) {
+            if (dx * dx + dy * dy <= r * r)
+                fb_putpixel(cx + dx, cy + dy, color);
+        }
+    }
+}
+
 static void draw_window(window_t *win)
 {
     if (win->minimized) return;
@@ -181,22 +191,27 @@ static void draw_window(window_t *win)
     int ty = y + (TITLEBAR_H - 16) / 2;
     fb_draw_string(tx, ty, win->title, tc->titlebar_text, 0x00000000);
 
-    /* Close button (red circle) */
-    int cbx = x + w - 22;
-    int cby = y + 6;
-    for (int dy = 0; dy < 16; dy++) {
-        for (int dx = 0; dx < 16; dx++) {
-            int cx = dx - 8, cy = dy - 8;
-            if (cx * cx + cy * cy <= 64) {
-                fb_putpixel(cbx + dx, cby + dy, tc->close_btn);
-            }
-        }
+    /* Title bar buttons (right side): Close / Maximize / Minimize */
+    int btn_y = y + TITLEBAR_H / 2;
+
+    /* Close button (red circle with X) */
+    int close_cx = x + w - 16;
+    draw_titlebar_circle(close_cx, btn_y, 7, tc->close_btn);
+    for (int i = -3; i <= 3; i++) {
+        fb_putpixel(close_cx + i, btn_y + i, 0xFFFFFF);
+        fb_putpixel(close_cx + i, btn_y - i, 0xFFFFFF);
     }
-    /* X mark on close button */
-    for (int i = 4; i < 12; i++) {
-        fb_putpixel(cbx + i, cby + i, 0xFFFFFF);
-        fb_putpixel(cbx + i, cby + 15 - i, 0xFFFFFF);
-    }
+
+    /* Maximize button (green circle with square) */
+    int max_cx = x + w - 36;
+    draw_titlebar_circle(max_cx, btn_y, 7, 0x44AA44);
+    fb_draw_rect(max_cx - 3, btn_y - 3, 7, 7, 0xFFFFFF);
+
+    /* Minimize button (yellow circle with dash) */
+    int min_cx = x + w - 56;
+    draw_titlebar_circle(min_cx, btn_y, 7, 0xDDAA22);
+    for (int i = -3; i <= 3; i++)
+        fb_putpixel(min_cx + i, btn_y, 0xFFFFFF);
 
     /* Client area border */
     int cy = y + TITLEBAR_H;
@@ -214,6 +229,17 @@ static void draw_window(window_t *win)
             for (int col = 0; col < cw; col++) {
                 fb_putpixel(x + BORDER_W + col, cy + BORDER_W + row,
                             win->canvas[row * cw + col]);
+            }
+        }
+    }
+
+    /* Unfocused window dimming overlay */
+    if (!win->focused) {
+        for (int row = 0; row < h + TITLEBAR_H; row++) {
+            for (int col = 0; col < w; col++) {
+                int px = x + col, py = y + row;
+                uint32_t orig = fb_getpixel(px, py);
+                fb_putpixel(px, py, rgba_blend(orig, 0x000000, 40));
             }
         }
     }
@@ -452,15 +478,32 @@ void desktop_draw_taskbar(void)
     draw_gloss(0, y, f->width, TASKBAR_H);
     draw_bevel(0, y, f->width, TASKBAR_H, 1);
 
-    /* "nextOS" start button */
-    draw_gradient_rect(4, y + 4, 80, TASKBAR_H - 8,
+    /* "nextOS" start button with logo */
+    draw_gradient_rect(4, y + 4, 90, TASKBAR_H - 8,
                        tc->button_top, tc->button_bot);
-    draw_bevel(4, y + 4, 80, TASKBAR_H - 8, 1);
-    draw_gloss(4, y + 4, 80, TASKBAR_H - 8);
-    fb_draw_string(14, y + 12, "nextOS", 0x1A1A1A, 0x00000000);
+    draw_bevel(4, y + 4, 90, TASKBAR_H - 8, 1);
+    draw_gloss(4, y + 4, 90, TASKBAR_H - 8);
+    /* Tiny "N" logo (12x12 pixel art) */
+    {
+        int lx = 10, ly = y + 10;
+        uint32_t lc = 0x3060B0;
+        /* Left vertical */
+        for (int r = 0; r < 12; r++) fb_putpixel(lx, ly + r, lc);
+        for (int r = 0; r < 12; r++) fb_putpixel(lx + 1, ly + r, lc);
+        /* Right vertical */
+        for (int r = 0; r < 12; r++) fb_putpixel(lx + 9, ly + r, lc);
+        for (int r = 0; r < 12; r++) fb_putpixel(lx + 10, ly + r, lc);
+        /* Diagonal */
+        for (int r = 0; r < 12; r++) {
+            int c = r * 8 / 11;
+            fb_putpixel(lx + 2 + c, ly + r, lc);
+            fb_putpixel(lx + 3 + c, ly + r, lc);
+        }
+    }
+    fb_draw_string(26, y + 12, "nextOS", 0x1A1A1A, 0x00000000);
 
     /* Window buttons on taskbar */
-    int bx = 100;
+    int bx = 110;
     for (int i = 0; i < MAX_WINDOWS; i++) {
         if (!windows[i].active) continue;
         draw_gradient_rect(bx, y + 4, 120, TASKBAR_H - 8,
@@ -551,6 +594,11 @@ window_t *compositor_create_window(const char *title, int x, int y, int w, int h
             windows[i].focused  = 1;
             windows[i].dragging = 0;
             windows[i].minimized = 0;
+            windows[i].maximized = 0;
+            windows[i].orig_x = x;
+            windows[i].orig_y = y;
+            windows[i].orig_w = w;
+            windows[i].orig_h = h;
             windows[i].close_hover = 0;
             windows[i].on_paint = (void *)0;
             windows[i].on_key   = (void *)0;
@@ -617,6 +665,43 @@ void compositor_render_frame(void)
     draw_start_menu();
 }
 
+/* ── Helper: find a window under (mx, my) — focused first ─────────────── */
+static window_t *window_at(int mx, int my)
+{
+    /* Check focused window first (it's visually on top) */
+    for (int i = 0; i < MAX_WINDOWS; i++) {
+        window_t *w = &windows[i];
+        if (!w->active || w->minimized || !w->focused) continue;
+        if (mx >= w->x && mx < w->x + w->width &&
+            my >= w->y && my < w->y + TITLEBAR_H + w->height)
+            return w;
+    }
+    /* Then unfocused, reverse order */
+    for (int i = MAX_WINDOWS - 1; i >= 0; i--) {
+        window_t *w = &windows[i];
+        if (!w->active || w->minimized || w->focused) continue;
+        if (mx >= w->x && mx < w->x + w->width &&
+            my >= w->y && my < w->y + TITLEBAR_H + w->height)
+            return w;
+    }
+    return (void *)0;
+}
+
+/* ── Helper: reallocate canvas after resize ───────────────────────────── */
+static void resize_canvas(window_t *w, int new_w, int new_h)
+{
+    int cw = new_w - BORDER_W * 2;
+    int ch = new_h - BORDER_W * 2;
+    if (w->canvas) kfree(w->canvas);
+    w->canvas = (uint32_t *)kmalloc(cw * ch * 4);
+    if (w->canvas) {
+        for (int p = 0; p < cw * ch; p++)
+            w->canvas[p] = 0xF0F0F0;
+    }
+    w->width = new_w;
+    w->height = new_h;
+}
+
 void compositor_handle_mouse(int mx, int my, int buttons)
 {
     int click = (buttons & 1) && !(prev_mouse_buttons & 1);
@@ -624,7 +709,7 @@ void compositor_handle_mouse(int mx, int my, int buttons)
     prev_mouse_buttons = buttons;
 
     /* Handle window dragging */
-    for (int i = MAX_WINDOWS - 1; i >= 0; i--) {
+    for (int i = 0; i < MAX_WINDOWS; i++) {
         window_t *w = &windows[i];
         if (!w->active || w->minimized) continue;
 
@@ -640,12 +725,31 @@ void compositor_handle_mouse(int mx, int my, int buttons)
     if (click) {
         framebuffer_t *f = fb_get();
 
-        /* Start menu button hit test */
+        /* Start menu button hit test (wider now: 90px) */
         int tb_y = (int)f->height - TASKBAR_H;
-        if (mx >= 4 && mx < 84 && my >= tb_y + 4 && my < tb_y + TASKBAR_H - 4) {
+        if (mx >= 4 && mx < 94 && my >= tb_y + 4 && my < tb_y + TASKBAR_H - 4) {
             start_menu_open = !start_menu_open;
             compositor_draw_cursor(mx, my);
             return;
+        }
+
+        /* Taskbar window button hit test — click to unminimize/focus */
+        if (my >= tb_y + 4 && my < tb_y + TASKBAR_H - 4) {
+            int bx = 110;
+            for (int i = 0; i < MAX_WINDOWS; i++) {
+                if (!windows[i].active) continue;
+                if (mx >= bx && mx < bx + 120) {
+                    if (windows[i].minimized) {
+                        windows[i].minimized = 0;
+                    }
+                    for (int j = 0; j < MAX_WINDOWS; j++)
+                        windows[j].focused = 0;
+                    windows[i].focused = 1;
+                    compositor_draw_cursor(mx, my);
+                    return;
+                }
+                bx += 128;
+            }
         }
 
         /* Start menu item hit test */
@@ -656,28 +760,23 @@ void compositor_handle_mouse(int mx, int my, int buttons)
             int menu_y = (int)f->height - TASKBAR_H - mh;
             if (mx >= menu_x && mx < menu_x + START_MENU_W &&
                 my >= menu_y && my < menu_y + mh) {
-                /* Determine which item was clicked, accounting for separator */
                 int rel_y = my - menu_y - 4;
                 int item;
-                /* Items 0-2 are at their normal positions */
-                /* Items 3-5 are shifted down by separator_h */
                 if (rel_y < 3 * START_MENU_ITEM_H) {
                     item = rel_y / START_MENU_ITEM_H;
                 } else if (rel_y < 3 * START_MENU_ITEM_H + separator_h) {
-                    item = -1;  /* clicked on separator */
+                    item = -1;
                 } else {
                     item = 3 + (rel_y - 3 * START_MENU_ITEM_H - separator_h) / START_MENU_ITEM_H;
                 }
                 if (item >= 0 && item < START_MENU_ITEMS) {
                     start_menu_open = 0;
-                    /* Launch the selected app via callback */
                     if (start_menu_callback)
                         start_menu_callback(item);
                 }
                 compositor_draw_cursor(mx, my);
                 return;
             }
-            /* Click outside menu closes it */
             start_menu_open = 0;
         }
 
@@ -690,13 +789,11 @@ void compositor_handle_mouse(int mx, int my, int buttons)
                 uint64_t now = timer_get_ticks();
                 if (last_icon_click_idx == i &&
                     (now - last_icon_click_tick) < DBLCLICK_MS) {
-                    /* Double-click: launch app */
                     selected_icon = -1;
                     last_icon_click_idx = -1;
                     if (start_menu_callback)
                         start_menu_callback(i);
                 } else {
-                    /* Single click: select */
                     selected_icon = i;
                     last_icon_click_tick = now;
                     last_icon_click_idx = i;
@@ -709,28 +806,39 @@ void compositor_handle_mouse(int mx, int my, int buttons)
         /* Click on empty desktop deselects icons */
         selected_icon = -1;
 
-        /* Check window title bars for drag / close / focus */
-        for (int i = MAX_WINDOWS - 1; i >= 0; i--) {
-            window_t *w = &windows[i];
-            if (!w->active || w->minimized) continue;
+        /* Window hit-test: use z-order-aware helper */
+        window_t *w = window_at(mx, my);
+        if (w) {
+            int btn_y_center = w->y + TITLEBAR_H / 2;
 
-            /* Close button hit test */
-            int cbx = w->x + w->width - 22;
-            int cby = w->y + 6;
-            if (mx >= cbx && mx < cbx + 16 && my >= cby && my < cby + 16) {
+            /* Close button (rightmost) */
+            int close_cx = w->x + w->width - 16;
+            if ((mx - close_cx) * (mx - close_cx) + (my - btn_y_center) * (my - btn_y_center) <= 49) {
                 compositor_destroy_window(w);
                 compositor_draw_cursor(mx, my);
                 return;
             }
 
-            /* Title bar hit test */
-            if (mx >= w->x && mx < w->x + w->width &&
-                my >= w->y && my < w->y + TITLEBAR_H) {
-                w->dragging = 1;
-                w->drag_ox  = mx - w->x;
-                w->drag_oy  = my - w->y;
-
-                /* Bring to front (focus) */
+            /* Maximize button (middle) */
+            int max_cx = w->x + w->width - 36;
+            if ((mx - max_cx) * (mx - max_cx) + (my - btn_y_center) * (my - btn_y_center) <= 49) {
+                if (w->maximized) {
+                    /* Restore */
+                    w->x = w->orig_x;
+                    w->y = w->orig_y;
+                    resize_canvas(w, w->orig_w, w->orig_h);
+                    w->maximized = 0;
+                } else {
+                    /* Maximize */
+                    w->orig_x = w->x;
+                    w->orig_y = w->y;
+                    w->orig_w = w->width;
+                    w->orig_h = w->height;
+                    w->x = 0;
+                    w->y = 0;
+                    resize_canvas(w, (int)f->width, (int)f->height - TASKBAR_H - TITLEBAR_H);
+                    w->maximized = 1;
+                }
                 for (int j = 0; j < MAX_WINDOWS; j++)
                     windows[j].focused = 0;
                 w->focused = 1;
@@ -738,9 +846,29 @@ void compositor_handle_mouse(int mx, int my, int buttons)
                 return;
             }
 
-            /* Client area hit */
-            if (mx >= w->x && mx < w->x + w->width &&
-                my >= w->y + TITLEBAR_H && my < w->y + TITLEBAR_H + w->height) {
+            /* Minimize button (leftmost of the three) */
+            int min_cx = w->x + w->width - 56;
+            if ((mx - min_cx) * (mx - min_cx) + (my - btn_y_center) * (my - btn_y_center) <= 49) {
+                w->minimized = 1;
+                w->focused = 0;
+                compositor_draw_cursor(mx, my);
+                return;
+            }
+
+            /* Title bar drag */
+            if (my >= w->y && my < w->y + TITLEBAR_H) {
+                w->dragging = 1;
+                w->drag_ox = mx - w->x;
+                w->drag_oy = my - w->y;
+                for (int j = 0; j < MAX_WINDOWS; j++)
+                    windows[j].focused = 0;
+                w->focused = 1;
+                compositor_draw_cursor(mx, my);
+                return;
+            }
+
+            /* Client area */
+            if (my >= w->y + TITLEBAR_H) {
                 for (int j = 0; j < MAX_WINDOWS; j++)
                     windows[j].focused = 0;
                 w->focused = 1;

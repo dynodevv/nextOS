@@ -29,6 +29,8 @@ struct window_s {
     int      dragging;
     int      drag_ox, drag_oy;
     int      minimized;
+    int      maximized;
+    int      orig_x, orig_y, orig_w, orig_h;  /* Pre-maximize geometry */
     int      close_hover;
 
     /* Callback: called each frame so the app can draw into canvas */

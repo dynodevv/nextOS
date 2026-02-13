@@ -1,5 +1,14 @@
 # nextOS
 
+```
+    ██╗   ██╗
+    ████╗  ██║  nextOS
+    ██╔██╗ ██║  The next generation
+    ██║╚██╗██║  operating system
+    ██║ ╚████║
+    ╚═╝  ╚═══╝
+```
+
 A highly optimized 64-bit operating system featuring a skeuomorphic desktop environment.
 
 ## Core Specifications
@@ -108,10 +117,11 @@ sudo dd if=nextos.iso of=/dev/sdX bs=4M status=progress
 ## Boot Flow
 
 1. **GRUB** loads `nextos.elf` via Multiboot2
-2. **boot.S** sets up long mode (64-bit), identity-maps memory, loads GDT
+2. **boot.S** sets up long mode (64-bit), identity-maps memory, loads GDT, enables SSE
 3. **kernel_main()** initialises GDT, IDT, memory, drivers, filesystem, and graphics
-4. **First Boot Installer** displays: *"Welcome to nextOS. Would you like to install to disk or try Live Mode?"*
-5. After selection, the **desktop compositor** renders the skeuomorphic environment
+4. **Installation check**: Kernel reads disk sector 1 for a magic marker. If found, the installer is skipped.
+5. **First Boot Installer** displays: *"Welcome to nextOS."* with an Install button. Installation writes a marker to disk so subsequent boots skip the installer.
+6. After installation (or on subsequent boots), the **desktop compositor** renders the skeuomorphic environment
 
 ## Applications
 
