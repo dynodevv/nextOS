@@ -1,0 +1,31 @@
+name: Build ISO
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y nasm grub-pc-bin grub-common grub2-common \
+            xorriso mtools grub-efi-amd64-bin
+
+      - name: Build ISO
+        run: make
+
+      - name: Upload ISO artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: nextos-iso
+          path: nextos.iso
