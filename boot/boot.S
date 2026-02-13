@@ -10,7 +10,7 @@
 .set CHECKSUM,            -(MULTIBOOT2_MAGIC + MULTIBOOT2_ARCH + HEADER_LENGTH)
 
 /* ── Multiboot2 Header ─────────────────────────────────────────────────── */
-.section .multiboot
+.section .multiboot, "a"
 .align 8
 multiboot_header:
     .long MULTIBOOT2_MAGIC

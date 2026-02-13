@@ -52,7 +52,7 @@ ALL_OBJS := $(BOOT_OBJ) $(ISR_OBJ) $(C_OBJS)
 
 # ── Outputs ──────────────────────────────────────────────────────────────────
 KERNEL   := nextos.elf
-ISO      := nextos.iso
+ISO      := nextOS.iso
 ISODIR   := isodir
 
 # ── Targets ──────────────────────────────────────────────────────────────────
