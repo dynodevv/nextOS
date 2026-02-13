@@ -46,6 +46,7 @@ void      compositor_destroy_window(window_t *win);
 void      compositor_render_frame(void);
 void      compositor_handle_mouse(int mx, int my, int buttons);
 void      compositor_handle_key(char ascii, int scancode, int pressed);
+void      compositor_set_app_launcher(void (*callback)(int item));
 
 /* Desktop */
 void      desktop_draw_wallpaper(void);

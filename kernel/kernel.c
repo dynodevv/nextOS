@@ -61,7 +61,21 @@ typedef struct {
 
 /* ── Installer / first boot state ─────────────────────────────────────── */
 static int installer_active = 1;
-static int installer_choice = -1;  /* -1=pending, 0=install, 1=live */
+
+/* ── Draw a cursor arrow (used on the installer screen) ───────────────── */
+static void draw_simple_cursor(int mx, int my)
+{
+    /* 16-pixel tall arrow: row i has pixels from col 0..arrow_width[i]-1 */
+    static const int arrow_w[] = {1,2,3,4,5,6,7,8,9,10,11,5,3,3,2,1};
+    for (int i = 0; i < 16; i++) {
+        for (int j = 0; j < arrow_w[i]; j++) {
+            if (j == 0 || j == arrow_w[i] - 1 || i == 0 || i == 15)
+                fb_putpixel(mx + j, my + i, 0x000000);
+            else
+                fb_putpixel(mx + j, my + i, 0xFFFFFF);
+        }
+    }
+}
 
 /* ── Draw the first-boot installer screen ─────────────────────────────── */
 static void draw_installer(void)
@@ -107,32 +121,31 @@ static void draw_installer(void)
     fb_draw_string(tx, py + 30, title, 0x1A1A2A, 0x00000000);
 
     /* Subtitle */
-    const char *sub = "Would you like to install to disk or try Live Mode?";
-    int sx = px + (pw - 51 * 8) / 2;
+    const char *sub = "Click below to install nextOS to your disk.";
+    int slen = 44;
+    int sx = px + (pw - slen * 8) / 2;
     fb_draw_string(sx, py + 60, sub, 0x404050, 0x00000000);
 
-    /* Install button */
-    int bw = 180, bh = 40;
-    int b1x = px + pw / 2 - bw - 20, b1y = py + 140;
+    /* Single centred Install button */
+    int bw = 200, bh = 44;
+    int bx = px + (pw - bw) / 2, by = py + 140;
     for (int row = 0; row < bh; row++) {
         uint32_t c = rgb(80 + row, 130 + row / 2, 200 - row);
         for (int col = 0; col < bw; col++) {
-            fb_putpixel(b1x + col, b1y + row, c);
+            fb_putpixel(bx + col, by + row, c);
         }
     }
-    fb_draw_string(b1x + (bw - 15 * 8) / 2, b1y + 12,
+    /* Button bevel */
+    for (int col = 0; col < bw; col++) {
+        fb_putpixel(bx + col, by, rgba_blend(fb_getpixel(bx + col, by), 0xFFFFFF, 100));
+        fb_putpixel(bx + col, by + bh - 1, rgba_blend(fb_getpixel(bx + col, by + bh - 1), 0x000000, 60));
+    }
+    fb_draw_string(bx + (bw - 15 * 8) / 2, by + 14,
                    "Install to Disk", 0xFFFFFF, 0x00000000);
 
-    /* Live Mode button */
-    int b2x = px + pw / 2 + 20, b2y = py + 140;
-    for (int row = 0; row < bh; row++) {
-        uint32_t c = rgb(60 + row, 160 - row / 3, 80 + row);
-        for (int col = 0; col < bw; col++) {
-            fb_putpixel(b2x + col, b2y + row, c);
-        }
-    }
-    fb_draw_string(b2x + (bw - 9 * 8) / 2, b2y + 12,
-                   "Live Mode", 0xFFFFFF, 0x00000000);
+    /* Draw cursor on top */
+    mouse_state_t ms = mouse_get_state();
+    draw_simple_cursor(ms.x, ms.y);
 
     fb_swap();
 }
@@ -144,19 +157,12 @@ static void handle_installer_input(void)
     int w = f->width, h = f->height;
     int pw = 500, ph = 260;
     int px = (w - pw) / 2, py = (h - ph) / 2;
-    int bw = 180, bh = 40;
-    int b1x = px + pw / 2 - bw - 20, b1y = py + 140;
-    int b2x = px + pw / 2 + 20, b2y = py + 140;
+    int bw = 200, bh = 44;
+    int bx = px + (pw - bw) / 2, by = py + 140;
 
     if (ms.buttons & 1) {
-        if (ms.x >= b1x && ms.x < b1x + bw &&
-            ms.y >= b1y && ms.y < b1y + bh) {
-            installer_choice = 0;
-            installer_active = 0;
-        }
-        if (ms.x >= b2x && ms.x < b2x + bw &&
-            ms.y >= b2y && ms.y < b2y + bh) {
-            installer_choice = 1;
+        if (ms.x >= bx && ms.x < bx + bw &&
+            ms.y >= by && ms.y < by + bh) {
             installer_active = 0;
         }
     }
@@ -199,6 +205,16 @@ static void parse_multiboot2(uint64_t mb_info_addr)
     }
 }
 
+/* ── App launcher (used by start menu and desktop icon clicks) ────────── */
+static void launch_app_by_index(int index)
+{
+    switch (index) {
+    case 0: settings_launch(); break;
+    case 1: explorer_launch(); break;
+    case 2: notepad_launch();  break;
+    }
+}
+
 /* ── Kernel main ──────────────────────────────────────────────────────── */
 void kernel_main(uint64_t mb_info_addr)
 {
@@ -234,22 +250,21 @@ void kernel_main(uint64_t mb_info_addr)
     /* 7. Compositor */
     compositor_init();
 
+    /* Register app launcher for start menu and desktop icon clicks */
+    compositor_set_app_launcher(launch_app_by_index);
+
     /* ── Main loop ─────────────────────────────────────────────────── */
     while (1) {
         /* Process keyboard events */
         key_event_t kev;
         while (keyboard_poll(&kev)) {
-            if (installer_active) {
-                /* Installer handles keyboard if needed */
-            } else {
-                if (kev.pressed) {
-                    compositor_handle_key(kev.ascii, kev.scancode, kev.pressed);
+            if (!installer_active && kev.pressed) {
+                compositor_handle_key(kev.ascii, kev.scancode, kev.pressed);
 
-                    /* Ctrl+1/2/3 to launch apps */
-                    if (kev.ctrl && kev.ascii == '1') settings_launch();
-                    if (kev.ctrl && kev.ascii == '2') explorer_launch();
-                    if (kev.ctrl && kev.ascii == '3') notepad_launch();
-                }
+                /* Ctrl+1/2/3 to launch apps */
+                if (kev.ctrl && kev.ascii == '1') settings_launch();
+                if (kev.ctrl && kev.ascii == '2') explorer_launch();
+                if (kev.ctrl && kev.ascii == '3') notepad_launch();
             }
         }
 

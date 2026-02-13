@@ -15,6 +15,8 @@ static window_t windows[MAX_WINDOWS];
 static int      window_count = 0;
 static theme_t  current_theme = THEME_BRUSHED_METAL;
 static int      prev_mouse_buttons = 0;
+static int      start_menu_open = 0;
+static void   (*start_menu_callback)(int item) = (void *)0;
 
 /* ── Theme colour palettes ────────────────────────────────────────────── */
 typedef struct {
@@ -228,8 +230,114 @@ void desktop_draw_wallpaper(void)
     }
 }
 
+/* ── Desktop icons ─────────────────────────────────────────────────────── */
+/* Icon grid: top-left of desktop, 80x80 per icon slot with 16px padding */
+#define ICON_W       64
+#define ICON_H       64
+#define ICON_PAD     16
+#define ICON_SLOT    (ICON_W + ICON_PAD)
+#define ICON_START_X 24
+#define ICON_START_Y 24
+#define ICON_LABEL_GAP 32  /* vertical gap between icon slots (includes label) */
+
+typedef struct {
+    const char *label;
+    uint32_t    color;    /* Primary icon colour */
+} desktop_icon_t;
+
+static const desktop_icon_t desktop_icons[] = {
+    { "Settings",  0x7090B0 },
+    { "Files",     0xD4A840 },
+    { "Notepad",   0xE8D860 },
+};
+#define DESKTOP_ICON_COUNT 3
+
+static void draw_desktop_icon(int x, int y, const desktop_icon_t *icon)
+{
+
+    /* Icon shadow */
+    fb_fill_rect(x + 3, y + 3, ICON_W, ICON_H, rgba_blend(0x000000, 0x000000, 60));
+
+    /* Icon body (gradient square) */
+    for (int r = 0; r < ICON_H; r++) {
+        uint32_t c = lerp_color(icon->color, rgba_blend(icon->color, 0x000000, 80), r, ICON_H);
+        for (int col = 0; col < ICON_W; col++)
+            fb_putpixel(x + col, y + r, c);
+    }
+    /* Gloss highlight on top half */
+    for (int r = 0; r < ICON_H / 2; r++) {
+        uint8_t alpha = 70 - (uint8_t)(r * 70 / (ICON_H / 2));
+        for (int col = 0; col < ICON_W; col++) {
+            uint32_t px = fb_getpixel(x + col, y + r);
+            fb_putpixel(x + col, y + r, rgba_blend(px, 0xFFFFFF, alpha));
+        }
+    }
+    /* Border */
+    fb_draw_rect(x, y, ICON_W, ICON_H, 0x303030);
+
+    /* Inner icon glyph (first letter of label, large) */
+    int lx = x + (ICON_W - 8) / 2;
+    int ly = y + (ICON_H - 16) / 2;
+    fb_draw_char(lx, ly, icon->label[0], 0xFFFFFF, 0x00000000);
+
+    /* Label below icon */
+    int label_len = str_len(icon->label);
+    int label_x = x + (ICON_W - label_len * 8) / 2;
+    int label_y = y + ICON_H + 4;
+    /* Label shadow */
+    fb_draw_string(label_x + 1, label_y + 1, icon->label, 0x000000, 0x00000000);
+    fb_draw_string(label_x, label_y, icon->label, 0xFFFFFF, 0x00000000);
+}
+
+static void draw_desktop_icons(void)
+{
+    for (int i = 0; i < DESKTOP_ICON_COUNT; i++) {
+        int x = ICON_START_X;
+        int y = ICON_START_Y + i * (ICON_H + ICON_LABEL_GAP);
+        draw_desktop_icon(x, y, &desktop_icons[i]);
+    }
+}
+
 /* ── Taskbar ──────────────────────────────────────────────────────────── */
 #define TASKBAR_H 40
+
+/* ── Start menu ──────────────────────────────────────────────────────── */
+#define START_MENU_W 180
+#define START_MENU_ITEM_H 32
+#define START_MENU_ITEMS 3
+
+static const char *start_menu_labels[START_MENU_ITEMS] = {
+    "Settings", "File Explorer", "Notepad"
+};
+
+static void draw_start_menu(void)
+{
+    if (!start_menu_open) return;
+    framebuffer_t *f = fb_get();
+    const theme_colors_t *tc = &themes[current_theme];
+
+    int mh = START_MENU_ITEMS * START_MENU_ITEM_H + 8;
+    int mx = 4;
+    int my = (int)f->height - TASKBAR_H - mh;
+
+    /* Menu shadow */
+    fb_fill_rect(mx + 4, my + 4, START_MENU_W, mh, 0x202020);
+    /* Menu background */
+    draw_gradient_rect(mx, my, START_MENU_W, mh, tc->button_top, tc->button_bot);
+    draw_bevel(mx, my, START_MENU_W, mh, 1);
+
+    /* Items */
+    for (int i = 0; i < START_MENU_ITEMS; i++) {
+        int iy = my + 4 + i * START_MENU_ITEM_H;
+        fb_draw_string(mx + 12, iy + 8, start_menu_labels[i], 0x1A1A1A, 0x00000000);
+        /* Separator line */
+        if (i < START_MENU_ITEMS - 1) {
+            for (int sx = mx + 4; sx < mx + START_MENU_W - 4; sx++)
+                fb_putpixel(sx, iy + START_MENU_ITEM_H - 1,
+                            rgba_blend(fb_getpixel(sx, iy + START_MENU_ITEM_H - 1), 0x000000, 30));
+        }
+    }
+}
 
 void desktop_draw_taskbar(void)
 {
@@ -262,23 +370,48 @@ void desktop_draw_taskbar(void)
 }
 
 /* ── Mouse cursor (skeuomorphic arrow with shadow) ────────────────────── */
+/* 16x20 bitmap arrow cursor — 1=black outline, 2=white fill, 0=transparent */
+static const uint8_t cursor_bitmap[20][16] = {
+    {1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+    {1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+    {1,2,1,0,0,0,0,0,0,0,0,0,0,0,0,0},
+    {1,2,2,1,0,0,0,0,0,0,0,0,0,0,0,0},
+    {1,2,2,2,1,0,0,0,0,0,0,0,0,0,0,0},
+    {1,2,2,2,2,1,0,0,0,0,0,0,0,0,0,0},
+    {1,2,2,2,2,2,1,0,0,0,0,0,0,0,0,0},
+    {1,2,2,2,2,2,2,1,0,0,0,0,0,0,0,0},
+    {1,2,2,2,2,2,2,2,1,0,0,0,0,0,0,0},
+    {1,2,2,2,2,2,2,2,2,1,0,0,0,0,0,0},
+    {1,2,2,2,2,2,2,2,2,2,1,0,0,0,0,0},
+    {1,2,2,2,2,2,2,1,1,1,1,0,0,0,0,0},
+    {1,2,2,2,1,2,2,1,0,0,0,0,0,0,0,0},
+    {1,2,2,1,0,1,2,2,1,0,0,0,0,0,0,0},
+    {1,2,1,0,0,1,2,2,1,0,0,0,0,0,0,0},
+    {1,1,0,0,0,0,1,2,2,1,0,0,0,0,0,0},
+    {1,0,0,0,0,0,1,2,2,1,0,0,0,0,0,0},
+    {0,0,0,0,0,0,0,1,2,1,0,0,0,0,0,0},
+    {0,0,0,0,0,0,0,1,1,0,0,0,0,0,0,0},
+    {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+};
+
 static void draw_cursor(int mx, int my)
 {
-    /* Shadow */
-    for (int i = 0; i < 12; i++) {
-        for (int j = 0; j <= i; j++) {
-            fb_putpixel(mx + j + 2, my + i + 2,
-                        rgba_blend(fb_getpixel(mx + j + 2, my + i + 2), 0x000000, 80));
+    /* Shadow (offset +2,+2) */
+    for (int r = 0; r < 20; r++) {
+        for (int c = 0; c < 16; c++) {
+            if (cursor_bitmap[r][c])
+                fb_putpixel(mx + c + 2, my + r + 2,
+                            rgba_blend(fb_getpixel(mx + c + 2, my + r + 2), 0x000000, 60));
         }
     }
-    /* White arrow with black outline */
-    for (int i = 0; i < 12; i++) {
-        for (int j = 0; j <= i; j++) {
-            if (j == 0 || j == i || i == 11) {
-                fb_putpixel(mx + j, my + i, 0x000000);
-            } else {
-                fb_putpixel(mx + j, my + i, 0xFFFFFF);
-            }
+    /* Arrow body */
+    for (int r = 0; r < 20; r++) {
+        for (int c = 0; c < 16; c++) {
+            uint8_t v = cursor_bitmap[r][c];
+            if (v == 1)
+                fb_putpixel(mx + c, my + r, 0x000000);
+            else if (v == 2)
+                fb_putpixel(mx + c, my + r, 0xFFFFFF);
         }
     }
 }
@@ -354,6 +487,9 @@ void compositor_render_frame(void)
     /* Draw desktop */
     desktop_draw_wallpaper();
 
+    /* Draw desktop icons */
+    draw_desktop_icons();
+
     /* Draw windows (back to front) */
     for (int i = 0; i < MAX_WINDOWS; i++) {
         if (windows[i].active && !windows[i].focused) {
@@ -371,6 +507,9 @@ void compositor_render_frame(void)
 
     /* Taskbar on top of everything */
     desktop_draw_taskbar();
+
+    /* Start menu above taskbar */
+    draw_start_menu();
 }
 
 void compositor_handle_mouse(int mx, int my, int buttons)
@@ -388,11 +527,56 @@ void compositor_handle_mouse(int mx, int my, int buttons)
             w->x = mx - w->drag_ox;
             w->y = my - w->drag_oy;
             if (release) w->dragging = 0;
+            draw_cursor(mx, my);
             return;
         }
     }
 
     if (click) {
+        framebuffer_t *f = fb_get();
+
+        /* Start menu button hit test */
+        int tb_y = (int)f->height - TASKBAR_H;
+        if (mx >= 4 && mx < 84 && my >= tb_y + 4 && my < tb_y + TASKBAR_H - 4) {
+            start_menu_open = !start_menu_open;
+            draw_cursor(mx, my);
+            return;
+        }
+
+        /* Start menu item hit test */
+        if (start_menu_open) {
+            int mh = START_MENU_ITEMS * START_MENU_ITEM_H + 8;
+            int menu_x = 4;
+            int menu_y = (int)f->height - TASKBAR_H - mh;
+            if (mx >= menu_x && mx < menu_x + START_MENU_W &&
+                my >= menu_y && my < menu_y + mh) {
+                int item = (my - menu_y - 4) / START_MENU_ITEM_H;
+                if (item >= 0 && item < START_MENU_ITEMS) {
+                    start_menu_open = 0;
+                    /* Launch the selected app via callback */
+                    if (start_menu_callback)
+                        start_menu_callback(item);
+                }
+                draw_cursor(mx, my);
+                return;
+            }
+            /* Click outside menu closes it */
+            start_menu_open = 0;
+        }
+
+        /* Desktop icon hit test */
+        for (int i = 0; i < DESKTOP_ICON_COUNT; i++) {
+            int ix = ICON_START_X;
+            int iy = ICON_START_Y + i * (ICON_H + ICON_LABEL_GAP);
+            if (mx >= ix && mx < ix + ICON_W &&
+                my >= iy && my < iy + ICON_H) {
+                if (start_menu_callback)
+                    start_menu_callback(i);
+                draw_cursor(mx, my);
+                return;
+            }
+        }
+
         /* Check window title bars for drag / close / focus */
         for (int i = MAX_WINDOWS - 1; i >= 0; i--) {
             window_t *w = &windows[i];
@@ -403,6 +587,7 @@ void compositor_handle_mouse(int mx, int my, int buttons)
             int cby = w->y + 6;
             if (mx >= cbx && mx < cbx + 16 && my >= cby && my < cby + 16) {
                 compositor_destroy_window(w);
+                draw_cursor(mx, my);
                 return;
             }
 
@@ -417,6 +602,7 @@ void compositor_handle_mouse(int mx, int my, int buttons)
                 for (int j = 0; j < MAX_WINDOWS; j++)
                     windows[j].focused = 0;
                 w->focused = 1;
+                draw_cursor(mx, my);
                 return;
             }
 
@@ -432,6 +618,7 @@ void compositor_handle_mouse(int mx, int my, int buttons)
                     int ly = my - w->y - TITLEBAR_H - BORDER_W;
                     w->on_mouse(w, lx, ly, buttons);
                 }
+                draw_cursor(mx, my);
                 return;
             }
         }
@@ -448,6 +635,11 @@ void compositor_handle_mouse(int mx, int my, int buttons)
 
     /* Draw cursor last */
     draw_cursor(mx, my);
+}
+
+void compositor_set_app_launcher(void (*callback)(int item))
+{
+    start_menu_callback = callback;
 }
 
 void compositor_handle_key(char ascii, int scancode, int pressed)
