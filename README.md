@@ -163,6 +163,10 @@ nextOS follows a **skeuomorphic** design philosophy throughout:
 - **Textures**: Leather-like panels, brushed metal, and glass themes
 - **Icons**: Manila folders, document icons with dog-ear corners
 
+## Known Issues
+
+- **Installer does not work.** The installer UI runs but does not actually install the OS to disk in a way that allows booting without the installation medium. See [TODO.md](TODO.md) for planned fixes.
+
 ## License
 
 MIT License — see [LICENSE](LICENSE).
