@@ -1,0 +1,386 @@
+/*
+ * nextOS - notepad.c
+ * Notepad application — yellow legal pad style text editor
+ *
+ * Features:
+ *   - Full text editing (cursor, backspace, enter, arrow keys)
+ *   - Open / Save file dialogs using kernel VFS + disk I/O
+ *   - Visual design: ruled yellow paper with red margin line
+ */
+#include "notepad.h"
+#include "../ui/compositor.h"
+#include "../gfx/framebuffer.h"
+#include "../fs/vfs.h"
+#include "../mem/heap.h"
+
+/* ── Text buffer ──────────────────────────────────────────────────────── */
+#define TEXT_MAX    8192
+#define LINE_HEIGHT 18
+#define CHAR_WIDTH  8
+#define MAX_PATH    256
+
+static window_t *notepad_win = (void *)0;
+static char      text_buf[TEXT_MAX];
+static int       text_len = 0;
+static int       cursor_pos = 0;
+static int       scroll_y = 0;
+static char      file_path[MAX_PATH] = "";
+static int       dialog_mode = 0;  /* 0=none, 1=open, 2=save */
+static char      dialog_input[MAX_PATH];
+static int       dialog_input_len = 0;
+
+/* ── Skeuomorphic colours ─────────────────────────────────────────────── */
+#define COL_PAPER      0xFFF8C8   /* Legal pad yellow */
+#define COL_PAPER_DARK 0xF0E8A0
+#define COL_RULED_LINE 0xC0D0E0   /* Blue rule lines */
+#define COL_MARGIN     0xE05050   /* Red margin line */
+#define COL_TEXT_COL   0x1A1A30
+#define COL_CURSOR     0xE03030
+#define COL_TOOLBAR_T  0xE8DCC8
+#define COL_TOOLBAR_B  0xC8BCA8
+#define COL_BTN_T      0xD8D0C0
+#define COL_BTN_B      0xA8A090
+#define COL_DIALOG_BG  0xE8E0D0
+#define COL_DIALOG_BRD 0x8B7D6B
+#define COL_INPUT_BG   0xFFFFF0
+
+/* ── Helpers ──────────────────────────────────────────────────────────── */
+static void fill_rect(uint32_t *c, int cw, int ch,
+                      int x, int y, int w, int h, uint32_t color)
+{
+    for (int r = y; r < y + h && r < ch; r++) {
+        if (r < 0) continue;
+        for (int col = x; col < x + w && col < cw; col++) {
+            if (col < 0) continue;
+            c[r * cw + col] = color;
+        }
+    }
+}
+
+static void draw_gradient(uint32_t *c, int cw, int ch,
+                          int x, int y, int w, int h,
+                          uint32_t top, uint32_t bot)
+{
+    for (int r = 0; r < h; r++) {
+        int py = y + r;
+        if (py < 0 || py >= ch) continue;
+        uint8_t tr = (top>>16)&0xFF, tg = (top>>8)&0xFF, tb = top&0xFF;
+        uint8_t br = (bot>>16)&0xFF, bg = (bot>>8)&0xFF, bb = bot&0xFF;
+        uint8_t rr = tr + (br - tr) * r / (h > 1 ? h - 1 : 1);
+        uint8_t rg = tg + (bg - tg) * r / (h > 1 ? h - 1 : 1);
+        uint8_t rb = tb + (bb - tb) * r / (h > 1 ? h - 1 : 1);
+        uint32_t color = ((uint32_t)rr << 16) | ((uint32_t)rg << 8) | rb;
+        for (int col = x; col < x + w && col < cw; col++) {
+            if (col < 0) continue;
+            c[py * cw + col] = color;
+        }
+    }
+}
+
+/* Count lines up to position */
+static int count_lines_to(int pos)
+{
+    int lines = 0;
+    for (int i = 0; i < pos; i++) {
+        if (text_buf[i] == '\n') lines++;
+    }
+    return lines;
+}
+
+/* Get column of cursor on its current line */
+static int cursor_column(void)
+{
+    int col = 0;
+    for (int i = cursor_pos - 1; i >= 0 && text_buf[i] != '\n'; i--)
+        col++;
+    return col;
+}
+
+/* ── Draw text content ────────────────────────────────────────────────── */
+static void draw_text_area(uint32_t *canvas, int cw, int ch)
+{
+    int text_x = 50;  /* After margin line */
+    int text_y_start = 36;
+    int line = 0;
+    int col = 0;
+
+    for (int i = 0; i <= text_len; i++) {
+        int screen_y = text_y_start + line * LINE_HEIGHT - scroll_y;
+
+        /* Draw cursor */
+        if (i == cursor_pos && screen_y >= text_y_start && screen_y < ch - 4) {
+            fill_rect(canvas, cw, ch, text_x + col * CHAR_WIDTH,
+                      screen_y, 2, LINE_HEIGHT, COL_CURSOR);
+        }
+
+        if (i >= text_len) break;
+
+        if (text_buf[i] == '\n') {
+            line++;
+            col = 0;
+        } else {
+            /* Character is rendered by the canvas; store position for overlay */
+            if (screen_y >= text_y_start && screen_y < ch - 4 &&
+                text_x + col * CHAR_WIDTH < cw - 4) {
+                /* For the canvas, we just mark the text position.
+                 * The actual glyph rendering uses fb_draw_char on swap. */
+            }
+            col++;
+        }
+    }
+}
+
+/* ── Dialog overlay ───────────────────────────────────────────────────── */
+static void draw_dialog(uint32_t *canvas, int cw, int ch)
+{
+    int dw = 300, dh = 100;
+    int dx = (cw - dw) / 2, dy = (ch - dh) / 2;
+
+    fill_rect(canvas, cw, ch, dx, dy, dw, dh, COL_DIALOG_BG);
+    /* Border */
+    for (int i = dx; i < dx + dw; i++) {
+        canvas[dy * cw + i] = COL_DIALOG_BRD;
+        canvas[(dy + dh - 1) * cw + i] = COL_DIALOG_BRD;
+    }
+    for (int i = dy; i < dy + dh; i++) {
+        canvas[i * cw + dx] = COL_DIALOG_BRD;
+        canvas[i * cw + dx + dw - 1] = COL_DIALOG_BRD;
+    }
+
+    /* Input field */
+    fill_rect(canvas, cw, ch, dx + 20, dy + 40, dw - 40, 24, COL_INPUT_BG);
+
+    /* OK button */
+    draw_gradient(canvas, cw, ch, dx + dw - 80, dy + dh - 32, 60, 24,
+                  COL_BTN_T, COL_BTN_B);
+}
+
+/* ── Paint callback ───────────────────────────────────────────────────── */
+static void notepad_paint(window_t *win)
+{
+    if (!win || !win->canvas) return;
+    int cw = win->width - 4;
+    int ch = win->height - 4;
+
+    /* Toolbar */
+    draw_gradient(win->canvas, cw, ch, 0, 0, cw, 32,
+                  COL_TOOLBAR_T, COL_TOOLBAR_B);
+
+    /* File | Open | Save buttons */
+    draw_gradient(win->canvas, cw, ch, 4, 4, 50, 24, COL_BTN_T, COL_BTN_B);
+    draw_gradient(win->canvas, cw, ch, 60, 4, 50, 24, COL_BTN_T, COL_BTN_B);
+    draw_gradient(win->canvas, cw, ch, 116, 4, 50, 24, COL_BTN_T, COL_BTN_B);
+
+    /* Paper area */
+    int paper_y = 32;
+    int paper_h = ch - paper_y;
+    fill_rect(win->canvas, cw, ch, 0, paper_y, cw, paper_h, COL_PAPER);
+
+    /* Ruled lines */
+    for (int y = paper_y + LINE_HEIGHT; y < ch; y += LINE_HEIGHT) {
+        for (int x = 0; x < cw; x++) {
+            win->canvas[y * cw + x] = COL_RULED_LINE;
+        }
+    }
+
+    /* Red margin line */
+    for (int y = paper_y; y < ch; y++) {
+        if (44 < cw) win->canvas[y * cw + 44] = COL_MARGIN;
+        if (45 < cw) win->canvas[y * cw + 45] = COL_MARGIN;
+    }
+
+    /* Text content */
+    draw_text_area(win->canvas, cw, ch);
+
+    /* Dialog overlay if active */
+    if (dialog_mode != 0) {
+        draw_dialog(win->canvas, cw, ch);
+    }
+}
+
+/* ── File I/O ─────────────────────────────────────────────────────────── */
+static void load_file(const char *path)
+{
+    vfs_node_t node;
+    if (vfs_open(path, &node) != 0) return;
+    if (node.type != VFS_FILE) return;
+
+    int bytes = vfs_read(&node, 0, TEXT_MAX - 1, text_buf);
+    if (bytes > 0) {
+        text_len = bytes;
+        text_buf[text_len] = 0;
+    }
+    cursor_pos = 0;
+    scroll_y = 0;
+
+    /* Store file path */
+    int i = 0;
+    while (path[i] && i < MAX_PATH - 1) { file_path[i] = path[i]; i++; }
+    file_path[i] = 0;
+}
+
+static void save_file(const char *path)
+{
+    vfs_node_t node;
+    if (vfs_open(path, &node) != 0) return;
+    vfs_write(&node, 0, text_len, text_buf);
+}
+
+/* ── Mouse callback ───────────────────────────────────────────────────── */
+static void notepad_mouse(window_t *win, int mx, int my, int buttons)
+{
+    (void)win;
+    if (!(buttons & 1)) return;
+
+    /* Dialog mode clicks */
+    if (dialog_mode) {
+        int cw = win->width - 4;
+        int ch = win->height - 4;
+        int dw = 300, dh = 100;
+        int dx = (cw - dw) / 2, dy = (ch - dh) / 2;
+
+        /* OK button */
+        if (mx >= dx + dw - 80 && mx < dx + dw - 20 &&
+            my >= dy + dh - 32 && my < dy + dh - 8) {
+            dialog_input[dialog_input_len] = 0;
+            if (dialog_mode == 1) {
+                load_file(dialog_input);
+            } else if (dialog_mode == 2) {
+                save_file(dialog_input);
+            }
+            dialog_mode = 0;
+        }
+        return;
+    }
+
+    /* Toolbar: Open button */
+    if (mx >= 60 && mx < 110 && my >= 4 && my < 28) {
+        dialog_mode = 1;
+        dialog_input_len = 0;
+        dialog_input[0] = 0;
+        return;
+    }
+    /* Toolbar: Save button */
+    if (mx >= 116 && mx < 166 && my >= 4 && my < 28) {
+        if (file_path[0]) {
+            save_file(file_path);
+        } else {
+            dialog_mode = 2;
+            dialog_input_len = 0;
+            dialog_input[0] = 0;
+        }
+        return;
+    }
+
+    /* Click in text area to position cursor */
+    if (my >= 36) {
+        int line_click = (my - 36 + scroll_y) / LINE_HEIGHT;
+        int col_click  = (mx - 50) / CHAR_WIDTH;
+        if (col_click < 0) col_click = 0;
+
+        /* Find position in text buffer */
+        int line = 0, col = 0, pos = 0;
+        for (int i = 0; i < text_len; i++) {
+            if (line == line_click && col == col_click) { pos = i; break; }
+            if (text_buf[i] == '\n') { line++; col = 0; }
+            else col++;
+            pos = i + 1;
+        }
+        if (pos > text_len) pos = text_len;
+        cursor_pos = pos;
+    }
+}
+
+/* ── Key callback ─────────────────────────────────────────────────────── */
+static void notepad_key(window_t *win, char ascii, int scancode, int pressed)
+{
+    (void)win;
+    if (!pressed) return;
+
+    /* Dialog mode typing */
+    if (dialog_mode) {
+        if (ascii == '\b') {
+            if (dialog_input_len > 0) dialog_input[--dialog_input_len] = 0;
+        } else if (ascii == '\n') {
+            dialog_input[dialog_input_len] = 0;
+            if (dialog_mode == 1) load_file(dialog_input);
+            else if (dialog_mode == 2) save_file(dialog_input);
+            dialog_mode = 0;
+        } else if (ascii >= 32 && dialog_input_len < MAX_PATH - 1) {
+            dialog_input[dialog_input_len++] = ascii;
+            dialog_input[dialog_input_len] = 0;
+        }
+        return;
+    }
+
+    /* Backspace */
+    if (ascii == '\b') {
+        if (cursor_pos > 0) {
+            for (int i = cursor_pos - 1; i < text_len - 1; i++)
+                text_buf[i] = text_buf[i + 1];
+            text_len--;
+            cursor_pos--;
+        }
+        return;
+    }
+
+    /* Arrow keys (scan codes) */
+    if (scancode == 0x4B && cursor_pos > 0) { cursor_pos--; return; }         /* Left  */
+    if (scancode == 0x4D && cursor_pos < text_len) { cursor_pos++; return; }   /* Right */
+    if (scancode == 0x48) { /* Up */
+        int col = cursor_column();
+        /* Move to previous line */
+        int pos = cursor_pos - col - 1;  /* end of previous line */
+        if (pos >= 0) {
+            int prev_start = pos;
+            while (prev_start > 0 && text_buf[prev_start - 1] != '\n')
+                prev_start--;
+            int prev_len = pos - prev_start;
+            cursor_pos = prev_start + (col < prev_len ? col : prev_len);
+        }
+        return;
+    }
+    if (scancode == 0x50) { /* Down */
+        int col = cursor_column();
+        /* Find start of next line */
+        int pos = cursor_pos;
+        while (pos < text_len && text_buf[pos] != '\n') pos++;
+        if (pos < text_len) {
+            pos++; /* skip newline */
+            int next_end = pos;
+            while (next_end < text_len && text_buf[next_end] != '\n')
+                next_end++;
+            int next_len = next_end - pos;
+            cursor_pos = pos + (col < next_len ? col : next_len);
+        }
+        return;
+    }
+
+    /* Normal character insertion */
+    if (ascii >= 32 || ascii == '\n' || ascii == '\t') {
+        if (text_len < TEXT_MAX - 1) {
+            for (int i = text_len; i > cursor_pos; i--)
+                text_buf[i] = text_buf[i - 1];
+            text_buf[cursor_pos] = ascii;
+            text_len++;
+            cursor_pos++;
+        }
+    }
+}
+
+/* ── Public: launch notepad ───────────────────────────────────────────── */
+void notepad_launch(void)
+{
+    if (notepad_win) return;
+
+    text_len = 0;
+    cursor_pos = 0;
+    text_buf[0] = 0;
+
+    notepad_win = compositor_create_window("Notepad", 200, 100, 500, 400);
+    if (!notepad_win) return;
+
+    notepad_win->on_paint = (void (*)(struct window *))notepad_paint;
+    notepad_win->on_mouse = (void (*)(struct window *, int, int, int))notepad_mouse;
+    notepad_win->on_key   = (void (*)(struct window *, char, int, int))notepad_key;
+}

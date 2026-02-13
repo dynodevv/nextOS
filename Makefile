@@ -1,0 +1,87 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# nextOS Makefile
+# Builds the kernel ELF and generates a Hybrid ISO (Legacy BIOS + UEFI)
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── Toolchain ────────────────────────────────────────────────────────────────
+CC      := gcc
+AS      := nasm
+LD      := ld
+
+CFLAGS  := -ffreestanding -nostdlib -nostdinc -fno-builtin -fno-stack-protector \
+           -mno-red-zone -m64 -Wall -Wextra -O2 -mcmodel=kernel \
+           -fno-pie -fno-pic
+LDFLAGS := -n -T linker.ld -nostdlib
+ASFLAGS := -f elf64
+
+# ── Sources ──────────────────────────────────────────────────────────────────
+# Boot assembly (uses GNU as syntax, compiled by gcc)
+BOOT_S  := boot/boot.S
+
+# Kernel architecture (uses GNU as syntax)
+ISR_S   := kernel/arch/x86_64/isr.S
+
+# C sources
+C_SRCS  := kernel/kernel.c \
+           kernel/arch/x86_64/gdt.c \
+           kernel/arch/x86_64/idt.c \
+           kernel/mem/pmm.c \
+           kernel/mem/heap.c \
+           kernel/mem/paging.c \
+           kernel/drivers/keyboard.c \
+           kernel/drivers/mouse.c \
+           kernel/drivers/disk.c \
+           kernel/drivers/timer.c \
+           kernel/gfx/framebuffer.c \
+           kernel/fs/vfs.c \
+           kernel/fs/fat32.c \
+           kernel/fs/ext2.c \
+           kernel/ui/compositor.c \
+           apps/settings/settings.c \
+           apps/explorer/explorer.c \
+           apps/notepad/notepad.c
+
+# ── Object files ─────────────────────────────────────────────────────────────
+BOOT_OBJ := $(BOOT_S:.S=.o)
+ISR_OBJ  := $(ISR_S:.S=.o)
+C_OBJS   := $(C_SRCS:.c=.o)
+
+ALL_OBJS := $(BOOT_OBJ) $(ISR_OBJ) $(C_OBJS)
+
+# ── Outputs ──────────────────────────────────────────────────────────────────
+KERNEL   := nextos.elf
+ISO      := nextos.iso
+ISODIR   := isodir
+
+# ── Targets ──────────────────────────────────────────────────────────────────
+.PHONY: all clean iso
+
+all: $(ISO)
+
+# Compile boot assembly (GNU as syntax via gcc)
+boot/boot.o: boot/boot.S
+	$(CC) $(CFLAGS) -c $< -o $@
+
+# Compile ISR assembly (GNU as syntax via gcc)
+kernel/arch/x86_64/isr.o: kernel/arch/x86_64/isr.S
+	$(CC) $(CFLAGS) -c $< -o $@
+
+# Compile C files
+%.o: %.c
+	$(CC) $(CFLAGS) -c $< -o $@
+
+# Link kernel
+$(KERNEL): $(ALL_OBJS) linker.ld
+	$(LD) $(LDFLAGS) -o $@ $(ALL_OBJS)
+
+# Build ISO
+$(ISO): $(KERNEL) iso/boot/grub/grub.cfg
+	mkdir -p $(ISODIR)/boot/grub
+	cp $(KERNEL) $(ISODIR)/boot/nextos.elf
+	cp iso/boot/grub/grub.cfg $(ISODIR)/boot/grub/grub.cfg
+	grub-mkrescue -o $@ $(ISODIR) 2>/dev/null || \
+		grub-mkrescue -o $@ $(ISODIR)
+
+clean:
+	rm -f $(ALL_OBJS) $(KERNEL) $(ISO)
+	rm -rf $(ISODIR)
