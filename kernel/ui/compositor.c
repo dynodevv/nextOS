@@ -67,11 +67,11 @@ static const theme_colors_t themes[THEME_COUNT] = {
 static uint32_t lerp_color(uint32_t a, uint32_t b, int t, int max)
 {
     if (max <= 0) return a;
-    uint8_t ar = (a >> 16) & 0xFF, ag = (a >> 8) & 0xFF, ab = a & 0xFF;
-    uint8_t br = (b >> 16) & 0xFF, bg = (b >> 8) & 0xFF, bb = b & 0xFF;
-    uint8_t rr = ar + (br - ar) * t / max;
-    uint8_t rg = ag + (bg - ag) * t / max;
-    uint8_t rb = ab + (bb - ab) * t / max;
+    uint32_t ar = (a >> 16) & 0xFF, ag = (a >> 8) & 0xFF, ab = a & 0xFF;
+    uint32_t br = (b >> 16) & 0xFF, bg = (b >> 8) & 0xFF, bb = b & 0xFF;
+    uint8_t rr = (uint8_t)(ar + (br - ar) * (uint32_t)t / (uint32_t)max);
+    uint8_t rg = (uint8_t)(ag + (bg - ag) * (uint32_t)t / (uint32_t)max);
+    uint8_t rb = (uint8_t)(ab + (bb - ab) * (uint32_t)t / (uint32_t)max);
     return rgb(rr, rg, rb);
 }
 

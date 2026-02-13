@@ -78,10 +78,10 @@ static void draw_canvas_gradient(uint32_t *canvas, int cw, int ch,
         int py = y + row;
         if (py < 0 || py >= ch) continue;
         uint8_t tr = (top>>16)&0xFF, tg = (top>>8)&0xFF, tb = top&0xFF;
-        uint8_t br = (bot>>16)&0xFF, bg_c = (bot>>8)&0xFF, bb = bot&0xFF;
-        uint8_t rr = tr + (br - tr) * row / (h > 1 ? h - 1 : 1);
-        uint8_t rg = tg + (bg_c - tg) * row / (h > 1 ? h - 1 : 1);
-        uint8_t rb = tb + (bb - tb) * row / (h > 1 ? h - 1 : 1);
+        uint8_t bot_r = (bot>>16)&0xFF, bot_g = (bot>>8)&0xFF, bot_b = bot&0xFF;
+        uint8_t rr = tr + (bot_r - tr) * row / (h > 1 ? h - 1 : 1);
+        uint8_t rg = tg + (bot_g - tg) * row / (h > 1 ? h - 1 : 1);
+        uint8_t rb = tb + (bot_b - tb) * row / (h > 1 ? h - 1 : 1);
         uint32_t c = ((uint32_t)rr << 16) | ((uint32_t)rg << 8) | rb;
         for (int col = x; col < x + w && col < cw; col++) {
             if (col < 0) continue;

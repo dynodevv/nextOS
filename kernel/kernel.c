@@ -57,6 +57,7 @@ typedef struct {
 /* ── Kernel heap region ───────────────────────────────────────────────── */
 #define KERNEL_HEAP_START  0x400000    /* 4 MiB */
 #define KERNEL_HEAP_SIZE   0x1000000   /* 16 MiB */
+#define FALLBACK_FB_ADDR   0xFD000000  /* Common QEMU framebuffer address */
 
 /* ── Installer / first boot state ─────────────────────────────────────── */
 static int installer_active = 1;
@@ -216,7 +217,7 @@ void kernel_main(uint64_t mb_info_addr)
     /* 4. Framebuffer */
     if (fb_addr == 0) {
         /* Fallback: use a known VGA text-mode area or halt */
-        fb_addr = 0xFD000000; /* Common QEMU framebuffer address */
+        fb_addr = FALLBACK_FB_ADDR;
     }
     fb_init(fb_addr, fb_width, fb_height, fb_pitch, fb_bpp);
     mouse_set_bounds(fb_width, fb_height);

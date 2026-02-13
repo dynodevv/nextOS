@@ -176,9 +176,12 @@ static char translate_scancode(uint8_t sc, int shifted)
     const layout_map_t *lm = &layouts[current_layout];
     char c = shifted ? lm->shift[sc] : lm->normal[sc];
 
-    /* Apply caps lock for alphabetic characters */
-    if (caps_lock && c >= 'a' && c <= 'z') c -= 32;
-    else if (caps_lock && c >= 'A' && c <= 'Z') c += 32;
+    /* Apply caps lock: toggle case only when shift is not held */
+    if (caps_lock && !shifted) {
+        if (c >= 'a' && c <= 'z') c -= 32;
+    } else if (caps_lock && shifted) {
+        if (c >= 'A' && c <= 'Z') c += 32;
+    }
 
     return c;
 }

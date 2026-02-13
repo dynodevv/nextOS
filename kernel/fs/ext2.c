@@ -151,7 +151,7 @@ int ext2_init(void)
     if (sb.s_magic != EXT2_MAGIC) return -1;
 
     block_size = 1024U << sb.s_log_block_size;
-    inode_size = (sb.s_rev_level >= 1) ? 128 : 128;  /* simplified */
+    inode_size = 128;  /* Standard inode size for rev0 and rev1 */
 
     block_buf = kmalloc(block_size);
     return block_buf ? 0 : -1;

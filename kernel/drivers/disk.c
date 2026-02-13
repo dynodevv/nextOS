@@ -66,7 +66,6 @@ static int ata_identify(disk_device_t *dev)
     ata_wait_drq(io);
 
     uint16_t ident[256];
-    for (int i = 0; i < 256; i++) ident[i] = 0;
     for (int i = 0; i < 256; i++) {
         ident[i] = inw(io + ATA_REG_DATA);
     }
