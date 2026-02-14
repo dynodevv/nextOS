@@ -165,7 +165,7 @@ nextOS follows a **skeuomorphic** design philosophy throughout:
 
 ## Known Issues
 
-- **Installer does not work.** The installer UI runs but does not actually install the OS to disk in a way that allows booting without the installation medium. See [TODO.md](TODO.md) for planned fixes.
+- None ATM
 
 ## License
 
