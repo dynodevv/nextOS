@@ -190,8 +190,11 @@ static void draw_theme_tab(uint32_t *canvas, int cw, int ch)
     draw_canvas_string(canvas, cw, ch, 20, 50, "Desktop Theme:",
                        COL_LABEL, COL_LEATHER);
 
-    static const char *theme_names[] = { "Brushed Metal", "Glossy Glass" };
-    for (int i = 0; i < 2; i++) {
+    static const char *theme_names[] = {
+        "Brushed Metal", "Glossy Glass",
+        "Dark Obsidian", "Warm Mahogany"
+    };
+    for (int i = 0; i < 4; i++) {
         int by = 80 + i * 40;
         uint32_t bg = (i == theme_index) ? COL_SELECTED : COL_BTN_TOP;
         uint32_t fg = (i == theme_index) ? COL_SEL_TEXT : COL_BTN_TEXT;
@@ -289,7 +292,7 @@ static void settings_mouse(window_t *win, int mx, int my, int buttons)
 
     /* Theme tab clicks */
     if (current_tab == TAB_THEME) {
-        for (int i = 0; i < 2; i++) {
+        for (int i = 0; i < 4; i++) {
             int by = 80 + i * 40;
             if (mx >= 20 && mx < 260 && my >= by && my < by + 32) {
                 theme_index = i;

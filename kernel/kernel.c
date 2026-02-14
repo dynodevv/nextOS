@@ -545,7 +545,7 @@ static void about_paint(window_t *win)
 
     /* Version & info lines */
     const char *lines[] = {
-        "Version 1.0",
+        "Version 2.0.0",
         "",
         "A next-generation",
         "operating system.",
