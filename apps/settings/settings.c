@@ -13,10 +13,11 @@
 #include "kernel/ui/compositor.h"
 #include "kernel/gfx/framebuffer.h"
 #include "kernel/drivers/keyboard.h"
+#include "kernel/drivers/mouse.h"
 #include "kernel/mem/heap.h"
 
 /* ── Tab identifiers ──────────────────────────────────────────────────── */
-typedef enum { TAB_DISPLAY = 0, TAB_THEME, TAB_KEYBOARD, TAB_COUNT } tab_t;
+typedef enum { TAB_DISPLAY = 0, TAB_THEME, TAB_KEYBOARD, TAB_MOUSE, TAB_COUNT } tab_t;
 static tab_t current_tab = TAB_DISPLAY;
 
 /* ── Display settings state ───────────────────────────────────────────── */
@@ -153,7 +154,7 @@ static void draw_canvas_string(uint32_t *canvas, int cw, int ch,
 }
 
 /* ── Tab drawing ──────────────────────────────────────────────────────── */
-static const char *tab_names[TAB_COUNT] = { "Display", "Theme", "Keyboard" };
+static const char *tab_names[TAB_COUNT] = { "Display", "Theme", "Keyboard", "Mouse" };
 
 static void draw_tabs(uint32_t *canvas, int cw, int ch)
 {
@@ -258,6 +259,54 @@ static void draw_keyboard_tab(uint32_t *canvas, int cw, int ch)
     }
 }
 
+/* ── Mouse tab ────────────────────────────────────────────────────────── */
+static void draw_mouse_tab(uint32_t *canvas, int cw, int ch)
+{
+    draw_canvas_gradient(canvas, cw, ch, 0, 32, cw, ch - 32,
+                         COL_LEATHER, COL_LEATHER_DARK);
+
+    draw_canvas_string(canvas, cw, ch, 20, 50, "Mouse Speed:",
+                       COL_LABEL, COL_LEATHER);
+
+    int speed = mouse_get_speed();
+
+    /* Speed slider track */
+    int track_x = 20, track_y = 80, track_w = 280, track_h = 8;
+    fill_canvas_rect(canvas, cw, ch, track_x, track_y, track_w, track_h, 0x908070);
+
+    /* Slider thumb */
+    int thumb_x = track_x + (speed - 1) * (track_w - 16) / 9;
+    draw_canvas_gradient(canvas, cw, ch, thumb_x, track_y - 8, 16, 24,
+                         COL_BTN_TOP, COL_BTN_BOT);
+
+    /* Speed label */
+    char speed_str[4];
+    if (speed >= 10) {
+        speed_str[0] = '1'; speed_str[1] = '0'; speed_str[2] = 0;
+    } else {
+        speed_str[0] = '0' + speed; speed_str[1] = 0;
+    }
+    draw_canvas_string(canvas, cw, ch, 310, 76, speed_str, COL_LABEL, COL_LEATHER);
+
+    /* Slow / Fast labels */
+    draw_canvas_string(canvas, cw, ch, 20, 110, "Slow", COL_LABEL, COL_LEATHER);
+    draw_canvas_string(canvas, cw, ch, 276, 110, "Fast", COL_LABEL, COL_LEATHER);
+
+    /* Speed preset buttons */
+    static const char *speed_labels[] = { "Slow", "Medium", "Fast" };
+    static const int speed_vals[] = { 2, 5, 8 };
+    for (int i = 0; i < 3; i++) {
+        int by = 140 + i * 36;
+        int is_sel = (speed == speed_vals[i]);
+        uint32_t bg = is_sel ? COL_SELECTED : COL_BTN_TOP;
+        uint32_t fg = is_sel ? COL_SEL_TEXT : COL_BTN_TEXT;
+        draw_canvas_gradient(canvas, cw, ch, 20, by, 140, 28,
+                             bg, is_sel ? 0x305880 : COL_BTN_BOT);
+        draw_canvas_string(canvas, cw, ch, 30, by + 6,
+                           speed_labels[i], fg, bg);
+    }
+}
+
 /* ── Paint callback ───────────────────────────────────────────────────── */
 static void settings_paint(window_t *win)
 {
@@ -276,6 +325,7 @@ static void settings_paint(window_t *win)
     case TAB_DISPLAY:  draw_display_tab(win->canvas, cw, ch);  break;
     case TAB_THEME:    draw_theme_tab(win->canvas, cw, ch);    break;
     case TAB_KEYBOARD: draw_keyboard_tab(win->canvas, cw, ch); break;
+    case TAB_MOUSE:    draw_mouse_tab(win->canvas, cw, ch);    break;
     default: break;
     }
 }
@@ -339,6 +389,27 @@ static void settings_mouse(window_t *win, int mx, int my, int buttons)
                 kb_scroll_offset--;
             } else if (my > 200 && kb_scroll_offset + KB_VISIBLE_ROWS < KB_LAYOUT_COUNT) {
                 kb_scroll_offset++;
+            }
+        }
+    }
+
+    /* Mouse tab clicks */
+    if (current_tab == TAB_MOUSE) {
+        /* Slider track click */
+        if (mx >= 20 && mx < 300 && my >= 72 && my < 104) {
+            int speed = 1 + (mx - 20) * 9 / 280;
+            if (speed < 1) speed = 1;
+            if (speed > 10) speed = 10;
+            mouse_set_speed(speed);
+            return;
+        }
+        /* Preset buttons */
+        static const int speed_vals[] = { 2, 5, 8 };
+        for (int i = 0; i < 3; i++) {
+            int by = 140 + i * 36;
+            if (mx >= 20 && mx < 160 && my >= by && my < by + 28) {
+                mouse_set_speed(speed_vals[i]);
+                return;
             }
         }
     }
