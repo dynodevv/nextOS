@@ -25,11 +25,12 @@ static int       text_len = 0;
 static int       cursor_pos = 0;
 static int       scroll_y = 0;
 static char      file_path[MAX_PATH] = "";
-static int       dialog_mode = 0;  /* 0=none, 1=open, 2=save */
+static int       dialog_mode = 0;  /* 0=none, 1=open, 2=save, 3=unsaved prompt */
 static char      dialog_input[MAX_PATH];
 static int       dialog_input_len = 0;
 static int       np_scrollbar_dragging = 0;
 static int       np_scrollbar_drag_offset = 0;
+static int       modified = 0;  /* Track unsaved changes */
 
 /* ── Skeuomorphic colours ─────────────────────────────────────────────── */
 #define COL_PAPER      0xFFF8C8   /* Legal pad yellow */
@@ -186,18 +187,58 @@ static void draw_text_area(uint32_t *canvas, int cw, int ch)
 /* ── Dialog overlay ───────────────────────────────────────────────────── */
 static void draw_dialog(uint32_t *canvas, int cw, int ch)
 {
+    if (dialog_mode == 3) {
+        /* Unsaved changes prompt */
+        int dw = 320, dh = 120;
+        int dx = (cw - dw) / 2, dy = (ch - dh) / 2;
+
+        fill_rect(canvas, cw, ch, dx, dy, dw, dh, COL_DIALOG_BG);
+        /* Border */
+        for (int i = dx; i < dx + dw; i++) {
+            if (dy >= 0 && dy < ch) canvas[dy * cw + i] = COL_DIALOG_BRD;
+            if (dy + dh - 1 < ch) canvas[(dy + dh - 1) * cw + i] = COL_DIALOG_BRD;
+        }
+        for (int i = dy; i < dy + dh; i++) {
+            if (dx >= 0) canvas[i * cw + dx] = COL_DIALOG_BRD;
+            if (dx + dw - 1 < cw) canvas[i * cw + dx + dw - 1] = COL_DIALOG_BRD;
+        }
+
+        canvas_draw_string(canvas, cw, ch, dx + 20, dy + 12,
+                           "Unsaved changes!", 0x1A1A1A);
+        canvas_draw_string(canvas, cw, ch, dx + 20, dy + 36,
+                           "Save before creating", 0x1A1A1A);
+        canvas_draw_string(canvas, cw, ch, dx + 20, dy + 52,
+                           "a new document?", 0x1A1A1A);
+
+        /* Save button */
+        draw_gradient(canvas, cw, ch, dx + 20, dy + dh - 36, 70, 24,
+                      COL_BTN_T, COL_BTN_B);
+        canvas_draw_string(canvas, cw, ch, dx + 32, dy + dh - 32, "Save", 0x1A1A1A);
+
+        /* Discard button */
+        draw_gradient(canvas, cw, ch, dx + 100, dy + dh - 36, 80, 24,
+                      COL_BTN_T, COL_BTN_B);
+        canvas_draw_string(canvas, cw, ch, dx + 106, dy + dh - 32, "Discard", 0x1A1A1A);
+
+        /* Cancel button */
+        draw_gradient(canvas, cw, ch, dx + 190, dy + dh - 36, 80, 24,
+                      COL_BTN_T, COL_BTN_B);
+        canvas_draw_string(canvas, cw, ch, dx + 198, dy + dh - 32, "Cancel", 0x1A1A1A);
+        return;
+    }
+
     int dw = 300, dh = 100;
     int dx = (cw - dw) / 2, dy = (ch - dh) / 2;
 
     fill_rect(canvas, cw, ch, dx, dy, dw, dh, COL_DIALOG_BG);
     /* Border */
     for (int i = dx; i < dx + dw; i++) {
-        canvas[dy * cw + i] = COL_DIALOG_BRD;
-        canvas[(dy + dh - 1) * cw + i] = COL_DIALOG_BRD;
+        if (dy >= 0 && dy < ch) canvas[dy * cw + i] = COL_DIALOG_BRD;
+        if (dy + dh - 1 < ch) canvas[(dy + dh - 1) * cw + i] = COL_DIALOG_BRD;
     }
     for (int i = dy; i < dy + dh; i++) {
-        canvas[i * cw + dx] = COL_DIALOG_BRD;
-        canvas[i * cw + dx + dw - 1] = COL_DIALOG_BRD;
+        if (dx >= 0) canvas[i * cw + dx] = COL_DIALOG_BRD;
+        if (dx + dw - 1 < cw) canvas[i * cw + dx + dw - 1] = COL_DIALOG_BRD;
     }
 
     /* Title */
@@ -295,9 +336,13 @@ static void load_file(const char *path)
     if (bytes > 0) {
         text_len = bytes;
         text_buf[text_len] = 0;
+    } else {
+        text_len = 0;
+        text_buf[0] = 0;
     }
     cursor_pos = 0;
     scroll_y = 0;
+    modified = 0;
 
     /* Store file path */
     int i = 0;
@@ -308,8 +353,30 @@ static void load_file(const char *path)
 static void save_file(const char *path)
 {
     vfs_node_t node;
-    if (vfs_open(path, &node) != 0) return;
+    /* Try to open existing file first */
+    if (vfs_open(path, &node) != 0) {
+        /* File doesn't exist, try to create it */
+        if (vfs_create(path, VFS_FILE) != 0) return;
+        if (vfs_open(path, &node) != 0) return;
+    }
     vfs_write(&node, 0, text_len, text_buf);
+    modified = 0;
+
+    /* Update stored path */
+    int i = 0;
+    while (path[i] && i < MAX_PATH - 1) { file_path[i] = path[i]; i++; }
+    file_path[i] = 0;
+}
+
+/* ── New document helper ──────────────────────────────────────────────── */
+static void new_document(void)
+{
+    text_len = 0;
+    text_buf[0] = 0;
+    cursor_pos = 0;
+    scroll_y = 0;
+    file_path[0] = 0;
+    modified = 0;
 }
 
 /* ── Mouse callback ───────────────────────────────────────────────────── */
@@ -354,6 +421,41 @@ static void notepad_mouse(window_t *win, int mx, int my, int buttons)
 
     /* Dialog mode clicks */
     if (dialog_mode) {
+        if (dialog_mode == 3) {
+            /* Unsaved changes prompt */
+            int dw = 320, dh = 120;
+            int dx = (cw - dw) / 2, dy = (ch - dh) / 2;
+
+            /* Save button */
+            if (mx >= dx + 20 && mx < dx + 90 &&
+                my >= dy + dh - 36 && my < dy + dh - 12) {
+                if (file_path[0]) {
+                    save_file(file_path);
+                    new_document();
+                } else {
+                    /* Need to ask for filename first */
+                    dialog_mode = 2;
+                    dialog_input_len = 0;
+                    dialog_input[0] = 0;
+                }
+                return;
+            }
+            /* Discard button */
+            if (mx >= dx + 100 && mx < dx + 180 &&
+                my >= dy + dh - 36 && my < dy + dh - 12) {
+                new_document();
+                dialog_mode = 0;
+                return;
+            }
+            /* Cancel button */
+            if (mx >= dx + 190 && mx < dx + 270 &&
+                my >= dy + dh - 36 && my < dy + dh - 12) {
+                dialog_mode = 0;
+                return;
+            }
+            return;
+        }
+
         int dw = 300, dh = 100;
         int dx = (cw - dw) / 2, dy = (ch - dh) / 2;
 
@@ -371,6 +473,16 @@ static void notepad_mouse(window_t *win, int mx, int my, int buttons)
         return;
     }
 
+    /* Toolbar: New button */
+    if (mx >= 4 && mx < 54 && my >= 4 && my < 28) {
+        if (modified && text_len > 0) {
+            /* Ask about unsaved changes */
+            dialog_mode = 3;
+        } else {
+            new_document();
+        }
+        return;
+    }
     /* Toolbar: Open button */
     if (mx >= 60 && mx < 110 && my >= 4 && my < 28) {
         dialog_mode = 1;
@@ -448,6 +560,7 @@ static void notepad_key(window_t *win, char ascii, int scancode, int pressed)
 
     /* Dialog mode typing */
     if (dialog_mode) {
+        if (dialog_mode == 3) return;  /* No typing in unsaved prompt */
         if (ascii == '\b') {
             if (dialog_input_len > 0) dialog_input[--dialog_input_len] = 0;
         } else if (ascii == '\n') {
@@ -469,6 +582,7 @@ static void notepad_key(window_t *win, char ascii, int scancode, int pressed)
                 text_buf[i] = text_buf[i + 1];
             text_len--;
             cursor_pos--;
+            modified = 1;
         }
         return;
     }
@@ -513,6 +627,7 @@ static void notepad_key(window_t *win, char ascii, int scancode, int pressed)
             text_buf[cursor_pos] = ascii;
             text_len++;
             cursor_pos++;
+            modified = 1;
         }
     }
 }
