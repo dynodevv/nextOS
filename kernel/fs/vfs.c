@@ -110,3 +110,24 @@ int vfs_readdir(vfs_node_t *dir, int index, vfs_node_t *child)
     if (!dir || dir->type != VFS_DIRECTORY || !dir->readdir) return -1;
     return dir->readdir(dir, index, child);
 }
+
+int vfs_create(const char *path, vfs_node_type_t type)
+{
+    (void)path; (void)type;
+    /* Not yet supported by concrete FS drivers */
+    return -1;
+}
+
+int vfs_delete(const char *path)
+{
+    (void)path;
+    /* Not yet supported by concrete FS drivers */
+    return -1;
+}
+
+int vfs_rename(const char *old_path, const char *new_path)
+{
+    (void)old_path; (void)new_path;
+    /* Not yet supported by concrete FS drivers */
+    return -1;
+}

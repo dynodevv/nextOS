@@ -36,5 +36,8 @@ int        vfs_open(const char *path, vfs_node_t *out);
 int        vfs_read(vfs_node_t *node, uint64_t offset, uint64_t size, void *buf);
 int        vfs_write(vfs_node_t *node, uint64_t offset, uint64_t size, const void *buf);
 int        vfs_readdir(vfs_node_t *dir, int index, vfs_node_t *child);
+int        vfs_create(const char *path, vfs_node_type_t type);
+int        vfs_delete(const char *path);
+int        vfs_rename(const char *old_path, const char *new_path);
 
 #endif /* NEXTOS_VFS_H */
