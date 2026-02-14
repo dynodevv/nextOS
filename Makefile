@@ -86,7 +86,7 @@ $(DISK_IMG): $(KERNEL_BASE) iso/boot/grub/grub.cfg tools/mkdiskimg.sh
 # Convert disk image to a linkable object file
 $(DISK_OBJ): $(DISK_IMG)
 	objcopy -I binary -O elf64-x86-64 -B i386:x86-64 \
-		--rename-section .data=.diskimg,alloc,load,readonly,data \
+		--rename-section .data=.diskimg,contents,alloc,load,readonly,data \
 		$(DISK_IMG) $(DISK_OBJ)
 
 # Pass 2: Link final kernel with embedded disk image
