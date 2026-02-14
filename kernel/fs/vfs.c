@@ -212,7 +212,6 @@ static int vfs_root_readdir(vfs_node_t *dir, int index, vfs_node_t *child)
 
     int disk_idx = index - ramfs_count;
     int disk_scan = 0;
-    int skip_count = 0;
 
     for (int i = 0; ; i++) {
         vfs_node_t disk_child;
@@ -235,6 +234,5 @@ static int vfs_root_readdir(vfs_node_t *dir, int index, vfs_node_t *child)
         disk_scan++;
     }
 
-    (void)skip_count;
     return -1;
 }
