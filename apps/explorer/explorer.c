@@ -25,6 +25,8 @@ static int         entry_count = 0;
 static int         selected_index = -1;
 static int         scroll_offset = 0;
 static char        current_path[PATH_MAX_LEN] = "/";
+static int         scrollbar_dragging = 0;
+static int         scrollbar_drag_offset = 0;
 
 /* ── Skeuomorphic colours ─────────────────────────────────────────────── */
 #define COL_CABINET_TOP  0xD4C4A0
@@ -271,10 +273,34 @@ static void explorer_paint(window_t *win)
 static void explorer_mouse(window_t *win, int mx, int my, int buttons)
 {
     (void)win;
-    if (!(buttons & 1)) return;
-
     int cw = win->width - 4;
-    (void)cw;
+    int ch = win->height - 4;
+    int list_y = 36;
+    int list_h = ch - list_y - 24;
+    int max_scroll = entry_count > VISIBLE_ROWS ? entry_count - VISIBLE_ROWS : 0;
+
+    /* Handle scrollbar drag */
+    if (scrollbar_dragging) {
+        if (!(buttons & 1)) {
+            scrollbar_dragging = 0;
+            return;
+        }
+        if (max_scroll > 0 && list_h > 0) {
+            int thumb_h = list_h * VISIBLE_ROWS / (entry_count > VISIBLE_ROWS ? entry_count : VISIBLE_ROWS);
+            if (thumb_h < 20) thumb_h = 20;
+            int track_range = list_h - thumb_h;
+            if (track_range > 0) {
+                int thumb_top = my - scrollbar_drag_offset;
+                int new_offset = (thumb_top - list_y) * max_scroll / track_range;
+                if (new_offset < 0) new_offset = 0;
+                if (new_offset > max_scroll) new_offset = max_scroll;
+                scroll_offset = new_offset;
+            }
+        }
+        return;
+    }
+
+    if (!(buttons & 1)) return;
 
     /* Back button */
     if (mx >= 4 && mx < 54 && my >= 4 && my < 28) {
@@ -293,8 +319,33 @@ static void explorer_mouse(window_t *win, int mx, int my, int buttons)
         return;
     }
 
+    /* Scrollbar thumb drag start */
+    if (mx >= cw - 14 && mx < cw - 2 && my >= list_y && my < list_y + list_h) {
+        if (entry_count > VISIBLE_ROWS) {
+            int thumb_h = list_h * VISIBLE_ROWS / entry_count;
+            if (thumb_h < 20) thumb_h = 20;
+            int track_range = list_h - thumb_h;
+            int thumb_y = list_y;
+            if (track_range > 0)
+                thumb_y = list_y + track_range * scroll_offset / max_scroll;
+            if (my >= thumb_y && my < thumb_y + thumb_h) {
+                scrollbar_dragging = 1;
+                scrollbar_drag_offset = my - thumb_y;
+                return;
+            }
+            /* Click on track above/below thumb: page scroll */
+            if (my < thumb_y) {
+                scroll_offset -= VISIBLE_ROWS;
+                if (scroll_offset < 0) scroll_offset = 0;
+            } else {
+                scroll_offset += VISIBLE_ROWS;
+                if (scroll_offset > max_scroll) scroll_offset = max_scroll;
+            }
+        }
+        return;
+    }
+
     /* File list click */
-    int list_y = 36;
     if (my >= list_y) {
         int vi = (my - list_y) / ENTRY_HEIGHT;
         int ei = scroll_offset + vi;

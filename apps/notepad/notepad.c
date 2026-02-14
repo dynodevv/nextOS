@@ -28,6 +28,8 @@ static char      file_path[MAX_PATH] = "";
 static int       dialog_mode = 0;  /* 0=none, 1=open, 2=save */
 static char      dialog_input[MAX_PATH];
 static int       dialog_input_len = 0;
+static int       np_scrollbar_dragging = 0;
+static int       np_scrollbar_drag_offset = 0;
 
 /* ── Skeuomorphic colours ─────────────────────────────────────────────── */
 #define COL_PAPER      0xFFF8C8   /* Legal pad yellow */
@@ -235,11 +237,11 @@ static void notepad_paint(window_t *win)
     /* Paper area */
     int paper_y = 32;
     int paper_h = ch - paper_y;
-    fill_rect(win->canvas, cw, ch, 0, paper_y, cw, paper_h, COL_PAPER);
+    fill_rect(win->canvas, cw, ch, 0, paper_y, cw - 14, paper_h, COL_PAPER);
 
     /* Ruled lines */
     for (int y = paper_y + LINE_HEIGHT; y < ch; y += LINE_HEIGHT) {
-        for (int x = 0; x < cw; x++) {
+        for (int x = 0; x < cw - 14; x++) {
             win->canvas[y * cw + x] = COL_RULED_LINE;
         }
     }
@@ -252,6 +254,29 @@ static void notepad_paint(window_t *win)
 
     /* Text content */
     draw_text_area(win->canvas, cw, ch);
+
+    /* Scrollbar on right side */
+    {
+        int sb_x = cw - 14;
+        fill_rect(win->canvas, cw, ch, sb_x, paper_y, 14, paper_h, 0xD0C8B8);
+        /* Count total lines */
+        int total_lines = 1;
+        for (int i = 0; i < text_len; i++) {
+            if (text_buf[i] == '\n') total_lines++;
+        }
+        int visible_lines = paper_h / LINE_HEIGHT;
+        if (visible_lines < 1) visible_lines = 1;
+        if (total_lines > visible_lines) {
+            int max_scroll = (total_lines - visible_lines) * LINE_HEIGHT;
+            if (max_scroll < 1) max_scroll = 1;
+            int thumb_h = paper_h * visible_lines / total_lines;
+            if (thumb_h < 20) thumb_h = 20;
+            int thumb_y = paper_y + (paper_h - thumb_h) * scroll_y / max_scroll;
+            if (thumb_y + thumb_h > paper_y + paper_h)
+                thumb_y = paper_y + paper_h - thumb_h;
+            fill_rect(win->canvas, cw, ch, sb_x + 2, thumb_y, 10, thumb_h, 0x807060);
+        }
+    }
 
     /* Dialog overlay if active */
     if (dialog_mode != 0) {
@@ -291,12 +316,44 @@ static void save_file(const char *path)
 static void notepad_mouse(window_t *win, int mx, int my, int buttons)
 {
     (void)win;
+    int cw = win->width - 4;
+    int ch = win->height - 4;
+    int paper_y = 32;
+    int paper_h = ch - paper_y;
+
+    /* Handle scrollbar drag */
+    if (np_scrollbar_dragging) {
+        if (!(buttons & 1)) {
+            np_scrollbar_dragging = 0;
+            return;
+        }
+        int total_lines = 1;
+        for (int i = 0; i < text_len; i++) {
+            if (text_buf[i] == '\n') total_lines++;
+        }
+        int visible_lines = paper_h / LINE_HEIGHT;
+        if (visible_lines < 1) visible_lines = 1;
+        int max_scroll = (total_lines - visible_lines) * LINE_HEIGHT;
+        if (max_scroll < 1) max_scroll = 1;
+        if (total_lines > visible_lines) {
+            int thumb_h = paper_h * visible_lines / total_lines;
+            if (thumb_h < 20) thumb_h = 20;
+            int track_range = paper_h - thumb_h;
+            if (track_range > 0) {
+                int thumb_top = my - np_scrollbar_drag_offset;
+                int new_scroll = (thumb_top - paper_y) * max_scroll / track_range;
+                if (new_scroll < 0) new_scroll = 0;
+                if (new_scroll > max_scroll) new_scroll = max_scroll;
+                scroll_y = new_scroll;
+            }
+        }
+        return;
+    }
+
     if (!(buttons & 1)) return;
 
     /* Dialog mode clicks */
     if (dialog_mode) {
-        int cw = win->width - 4;
-        int ch = win->height - 4;
         int dw = 300, dh = 100;
         int dx = (cw - dw) / 2, dy = (ch - dh) / 2;
 
@@ -329,6 +386,37 @@ static void notepad_mouse(window_t *win, int mx, int my, int buttons)
             dialog_mode = 2;
             dialog_input_len = 0;
             dialog_input[0] = 0;
+        }
+        return;
+    }
+
+    /* Scrollbar click/drag on right side */
+    if (mx >= cw - 14 && my >= paper_y && my < paper_y + paper_h) {
+        int total_lines = 1;
+        for (int i = 0; i < text_len; i++) {
+            if (text_buf[i] == '\n') total_lines++;
+        }
+        int visible_lines = paper_h / LINE_HEIGHT;
+        if (visible_lines < 1) visible_lines = 1;
+        if (total_lines > visible_lines) {
+            int max_scroll = (total_lines - visible_lines) * LINE_HEIGHT;
+            if (max_scroll < 1) max_scroll = 1;
+            int thumb_h = paper_h * visible_lines / total_lines;
+            if (thumb_h < 20) thumb_h = 20;
+            int track_range = paper_h - thumb_h;
+            int thumb_y = paper_y;
+            if (track_range > 0)
+                thumb_y = paper_y + track_range * scroll_y / max_scroll;
+            if (my >= thumb_y && my < thumb_y + thumb_h) {
+                np_scrollbar_dragging = 1;
+                np_scrollbar_drag_offset = my - thumb_y;
+            } else if (my < thumb_y) {
+                scroll_y -= visible_lines * LINE_HEIGHT;
+                if (scroll_y < 0) scroll_y = 0;
+            } else {
+                scroll_y += visible_lines * LINE_HEIGHT;
+                if (scroll_y > max_scroll) scroll_y = max_scroll;
+            }
         }
         return;
     }
