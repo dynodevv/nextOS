@@ -31,6 +31,15 @@ SECTIONS
         *(.data .data.*)
     }
 
+    /* Embedded bootable disk image (written to disk during installation).
+     * Placed BEFORE .bss so it is part of the main LOAD segment's file
+     * data.  If placed after .bss, the linker emits a separate LOAD
+     * segment that GRUB's Multiboot2 ELF loader does not load.          */
+    .diskimg ALIGN(4K) :
+    {
+        *(.diskimg)
+    }
+
     .bss ALIGN(4K) :
     {
         *(COMMON)
