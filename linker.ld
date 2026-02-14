@@ -37,6 +37,12 @@ SECTIONS
         *(.bss .bss.*)
     }
 
+    /* Embedded bootable disk image (written to disk during installation) */
+    .diskimg ALIGN(4K) :
+    {
+        *(.diskimg)
+    }
+
     _end = .;
 
     /DISCARD/ :
