@@ -32,12 +32,18 @@ mkdir -p "${MOUNT_DIR}" "${GRUB_DIR}"
 # ── Step 1: Create GRUB core.img with embedded early config ──────────────
 cat > "${TMPDIR}/grub_early.cfg" << 'GRUBCFG'
 set root='(hd0,msdos1)'
+set prefix=(hd0,msdos1)/boot/grub
+insmod normal
+normal
+# Fallback: if normal-mode config loading fails, boot directly
+multiboot2 /boot/nextos.elf
+boot
 GRUBCFG
 
 grub-mkimage -O i386-pc -o "${GRUB_DIR}/core.img" \
     -c "${TMPDIR}/grub_early.cfg" \
     -p /boot/grub \
-    biosdisk part_msdos ext2 multiboot2 boot normal
+    biosdisk part_msdos ext2 multiboot2 boot normal configfile
 
 cp /usr/lib/grub/i386-pc/boot.img "${GRUB_DIR}/boot.img"
 
@@ -53,7 +59,7 @@ dd if=/dev/zero of="${DISK_IMG}" bs=1M count=2 2>/dev/null
 
 # ── Step 3: Create MBR partition table ──────────────────────────────────
 echo "label: dos
-start=2048, type=83" | sfdisk "${DISK_IMG}" >/dev/null 2>&1
+start=2048, type=83, bootable" | sfdisk "${DISK_IMG}" >/dev/null 2>&1
 
 # ── Step 4: Set up loop device, format, and populate ────────────────────
 LOOP=$(sudo losetup --find --show --partscan "${DISK_IMG}")
@@ -70,7 +76,7 @@ sudo umount "${MOUNT_DIR}"
 sudo grub-bios-setup \
     -d "${GRUB_DIR}" \
     -f -s \
-    "${LOOP}" 2>/dev/null
+    "${LOOP}"
 
 sudo losetup -d "${LOOP}"
 
