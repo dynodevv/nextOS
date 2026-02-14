@@ -344,10 +344,14 @@ static void load_file(const char *path)
     scroll_y = 0;
     modified = 0;
 
-    /* Store file path */
-    int i = 0;
-    while (path[i] && i < MAX_PATH - 1) { file_path[i] = path[i]; i++; }
-    file_path[i] = 0;
+    /* Store file path only on successful read */
+    if (bytes > 0) {
+        int i = 0;
+        while (path[i] && i < MAX_PATH - 1) { file_path[i] = path[i]; i++; }
+        file_path[i] = 0;
+    } else {
+        file_path[0] = 0;
+    }
 }
 
 static void save_file(const char *path)

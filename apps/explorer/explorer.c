@@ -545,8 +545,10 @@ static void explorer_mouse(window_t *win, int mx, int my, int buttons)
                         vfs_node_t src_node;
                         if (vfs_open(clipboard_path, &src_node) == 0 &&
                             src_node.type == VFS_FILE) {
-                            char copy_buf[512];
-                            int bytes = vfs_read(&src_node, 0, 512, copy_buf);
+                            char copy_buf[4096];
+                            uint64_t file_sz = src_node.size;
+                            if (file_sz > sizeof(copy_buf)) file_sz = sizeof(copy_buf);
+                            int bytes = vfs_read(&src_node, 0, file_sz, copy_buf);
                             if (bytes > 0) {
                                 vfs_node_t dst_node;
                                 if (vfs_open(dest_path, &dst_node) == 0) {

@@ -350,11 +350,16 @@ void desktop_draw_wallpaper(void)
     /* Rebuild cache if theme changed or first render */
     if (wallpaper_dirty || wallpaper_theme != current_theme ||
         wallpaper_w != f->width || wallpaper_h != f->height) {
-        if (wallpaper_cache) kfree(wallpaper_cache);
-        wallpaper_w = f->width;
-        wallpaper_h = f->height;
-        wallpaper_cache = (uint32_t *)kmalloc(wallpaper_w * wallpaper_h * 4);
         if (wallpaper_cache) {
+            kfree(wallpaper_cache);
+            wallpaper_cache = (void *)0;
+            wallpaper_w = 0;
+            wallpaper_h = 0;
+        }
+        wallpaper_cache = (uint32_t *)kmalloc(f->width * f->height * 4);
+        if (wallpaper_cache) {
+            wallpaper_w = f->width;
+            wallpaper_h = f->height;
             for (uint32_t y = 0; y < wallpaper_h; y++) {
                 uint32_t c = lerp_color(tc->desktop_top, tc->desktop_bot, (int)y, (int)wallpaper_h);
                 for (uint32_t x = 0; x < wallpaper_w; x++) {

@@ -56,8 +56,8 @@ static void mouse_irq(uint64_t irq, uint64_t err)
         mouse_cycle = 0;
 
         state.buttons = mouse_bytes[0] & 0x07;
-        state.dx = mouse_bytes[1] * mouse_speed / 5;
-        state.dy = (-mouse_bytes[2]) * mouse_speed / 5;
+        state.dx = (int)mouse_bytes[1] * mouse_speed / 5;
+        state.dy = (-(int)mouse_bytes[2]) * mouse_speed / 5;
 
         state.x += state.dx;
         state.y += state.dy;
