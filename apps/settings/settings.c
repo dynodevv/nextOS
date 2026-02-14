@@ -38,6 +38,8 @@ static int theme_index = 0;  /* 0 = Brushed Metal, 1 = Glossy Glass */
 /* ── Keyboard layout state ────────────────────────────────────────────── */
 static int kb_layout_index = 0;
 static int kb_scroll_offset = 0;
+static int kb_scrollbar_dragging = 0;
+static int kb_scrollbar_drag_offset = 0;
 #define KB_VISIBLE_ROWS 8
 
 /* ── Skeuomorphic colours ─────────────────────────────────────────────── */
@@ -235,11 +237,14 @@ static void draw_keyboard_tab(uint32_t *canvas, int cw, int ch)
                        COL_LABEL, COL_LEATHER);
 
     /* Scrollable list of layouts */
+    int list_y = 80;
+    int list_h = KB_VISIBLE_ROWS * 30;
+
     for (int vi = 0; vi < KB_VISIBLE_ROWS; vi++) {
         int li = kb_scroll_offset + vi;
         if (li >= KB_LAYOUT_COUNT) break;
 
-        int by = 80 + vi * 30;
+        int by = list_y + vi * 30;
         uint32_t bg = (li == kb_layout_index) ? COL_SELECTED : COL_BTN_TOP;
         uint32_t fg = (li == kb_layout_index) ? COL_SEL_TEXT : COL_BTN_TEXT;
         draw_canvas_gradient(canvas, cw, ch, 20, by, 280, 24,
@@ -248,14 +253,19 @@ static void draw_keyboard_tab(uint32_t *canvas, int cw, int ch)
                            keyboard_layout_name((kb_layout_t)li), fg, bg);
     }
 
-    /* Scroll indicators */
-    if (kb_scroll_offset > 0) {
-        draw_canvas_string(canvas, cw, ch, 310, 80, "^", COL_LABEL, COL_LEATHER);
-    }
-    if (kb_scroll_offset + KB_VISIBLE_ROWS < KB_LAYOUT_COUNT) {
-        draw_canvas_string(canvas, cw, ch, 310,
-                           80 + (KB_VISIBLE_ROWS - 1) * 30,
-                           "v", COL_LABEL, COL_LEATHER);
+    /* Scrollbar track */
+    int sb_x = 310;
+    int sb_w = 12;
+    fill_canvas_rect(canvas, cw, ch, sb_x, list_y, sb_w, list_h, 0xA09888);
+    if (KB_LAYOUT_COUNT > KB_VISIBLE_ROWS) {
+        int max_scroll = KB_LAYOUT_COUNT - KB_VISIBLE_ROWS;
+        int thumb_h = list_h * KB_VISIBLE_ROWS / KB_LAYOUT_COUNT;
+        if (thumb_h < 20) thumb_h = 20;
+        int track_range = list_h - thumb_h;
+        int thumb_y = list_y;
+        if (track_range > 0 && max_scroll > 0)
+            thumb_y = list_y + track_range * kb_scroll_offset / max_scroll;
+        fill_canvas_rect(canvas, cw, ch, sb_x + 1, thumb_y, sb_w - 2, thumb_h, 0x706050);
     }
 }
 
@@ -334,9 +344,34 @@ static void settings_paint(window_t *win)
 static void settings_mouse(window_t *win, int mx, int my, int buttons)
 {
     (void)win;
-    if (!(buttons & 1)) return;
 
     int cw = win->width - 4;
+
+    /* Handle keyboard scrollbar drag */
+    if (kb_scrollbar_dragging) {
+        if (!(buttons & 1)) {
+            kb_scrollbar_dragging = 0;
+            return;
+        }
+        int list_y = 80;
+        int list_h = KB_VISIBLE_ROWS * 30;
+        int max_scroll = KB_LAYOUT_COUNT - KB_VISIBLE_ROWS;
+        if (max_scroll > 0 && list_h > 0) {
+            int thumb_h = list_h * KB_VISIBLE_ROWS / KB_LAYOUT_COUNT;
+            if (thumb_h < 20) thumb_h = 20;
+            int track_range = list_h - thumb_h;
+            if (track_range > 0) {
+                int thumb_top = my - kb_scrollbar_drag_offset;
+                int new_offset = (thumb_top - list_y) * max_scroll / track_range;
+                if (new_offset < 0) new_offset = 0;
+                if (new_offset > max_scroll) new_offset = max_scroll;
+                kb_scroll_offset = new_offset;
+            }
+        }
+        return;
+    }
+
+    if (!(buttons & 1)) return;
 
     /* Tab click */
     if (my >= 0 && my < 30) {
@@ -373,22 +408,45 @@ static void settings_mouse(window_t *win, int mx, int my, int buttons)
 
     /* Keyboard tab clicks */
     if (current_tab == TAB_KEYBOARD) {
+        /* Scrollbar interaction */
+        int list_y = 80;
+        int list_h = KB_VISIBLE_ROWS * 30;
+        int sb_x = 310;
+        if (mx >= sb_x && mx < sb_x + 12 && my >= list_y && my < list_y + list_h) {
+            if (KB_LAYOUT_COUNT > KB_VISIBLE_ROWS) {
+                int max_scroll = KB_LAYOUT_COUNT - KB_VISIBLE_ROWS;
+                int thumb_h = list_h * KB_VISIBLE_ROWS / KB_LAYOUT_COUNT;
+                if (thumb_h < 20) thumb_h = 20;
+                int track_range = list_h - thumb_h;
+                int thumb_y = list_y;
+                if (track_range > 0 && max_scroll > 0)
+                    thumb_y = list_y + track_range * kb_scroll_offset / max_scroll;
+                if (my >= thumb_y && my < thumb_y + thumb_h) {
+                    kb_scrollbar_dragging = 1;
+                    kb_scrollbar_drag_offset = my - thumb_y;
+                    return;
+                }
+                /* Click on track: page scroll */
+                if (my < thumb_y) {
+                    kb_scroll_offset -= KB_VISIBLE_ROWS;
+                    if (kb_scroll_offset < 0) kb_scroll_offset = 0;
+                } else {
+                    kb_scroll_offset += KB_VISIBLE_ROWS;
+                    if (kb_scroll_offset > max_scroll) kb_scroll_offset = max_scroll;
+                }
+            }
+            return;
+        }
+
+        /* Layout item clicks */
         for (int vi = 0; vi < KB_VISIBLE_ROWS; vi++) {
             int li = kb_scroll_offset + vi;
             if (li >= KB_LAYOUT_COUNT) break;
-            int by = 80 + vi * 30;
+            int by = list_y + vi * 30;
             if (mx >= 20 && mx < 300 && my >= by && my < by + 24) {
                 kb_layout_index = li;
                 keyboard_set_layout((kb_layout_t)li);
                 return;
-            }
-        }
-        /* Scroll up/down buttons */
-        if (mx >= 310 && mx < 330) {
-            if (my < 120 && kb_scroll_offset > 0) {
-                kb_scroll_offset--;
-            } else if (my > 200 && kb_scroll_offset + KB_VISIBLE_ROWS < KB_LAYOUT_COUNT) {
-                kb_scroll_offset++;
             }
         }
     }
