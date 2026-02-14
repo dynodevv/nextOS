@@ -403,11 +403,27 @@ void fb_draw_char(int x, int y, char c, uint32_t fg, uint32_t bg)
     const uint8_t *glyph = font_8x16[c - 32];
     for (int row = 0; row < 16; row++) {
         uint8_t bits = glyph[row];
+        uint8_t bits_above = (row > 0)  ? glyph[row - 1] : 0;
+        uint8_t bits_below = (row < 15) ? glyph[row + 1] : 0;
         for (int col = 0; col < 8; col++) {
-            if (bits & (0x80 >> col))
+            uint8_t mask = 0x80 >> col;
+            if (bits & mask) {
                 fb_putpixel(x + col, y + row, fg);
-            else if (bg != 0)
-                fb_putpixel(x + col, y + row, bg);
+            } else {
+                /* Anti-alias: check if adjacent pixels are filled */
+                int neighbors = 0;
+                if (bits_above & mask) neighbors++;
+                if (bits_below & mask) neighbors++;
+                if (col > 0 && (bits & (mask << 1))) neighbors++;
+                if (col < 7 && (bits & (mask >> 1))) neighbors++;
+                if (neighbors > 0) {
+                    uint32_t base = (bg != 0) ? bg : fb_getpixel(x + col, y + row);
+                    uint8_t alpha = (uint8_t)(neighbors * 40);
+                    fb_putpixel(x + col, y + row, rgba_blend(base, fg, alpha));
+                } else if (bg != 0) {
+                    fb_putpixel(x + col, y + row, bg);
+                }
+            }
         }
     }
 }

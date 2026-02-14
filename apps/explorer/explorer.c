@@ -61,11 +61,30 @@ static void canvas_draw_char(uint32_t *canvas, int cw, int ch,
         int py = y + row;
         if (py < 0 || py >= ch) continue;
         uint8_t bits = glyph[row];
+        uint8_t bits_above = (row > 0)  ? glyph[row - 1] : 0;
+        uint8_t bits_below = (row < 15) ? glyph[row + 1] : 0;
         for (int col = 0; col < 8; col++) {
-            if (bits & (0x80 >> col)) {
-                int px = x + col;
-                if (px >= 0 && px < cw)
-                    canvas[py * cw + px] = fg;
+            int px = x + col;
+            if (px < 0 || px >= cw) continue;
+            uint8_t mask = 0x80 >> col;
+            if (bits & mask) {
+                canvas[py * cw + px] = fg;
+            } else {
+                int neighbors = 0;
+                if (bits_above & mask) neighbors++;
+                if (bits_below & mask) neighbors++;
+                if (col > 0 && (bits & (mask << 1))) neighbors++;
+                if (col < 7 && (bits & (mask >> 1))) neighbors++;
+                if (neighbors > 0) {
+                    uint32_t base = canvas[py * cw + px];
+                    uint8_t sr = (fg >> 16) & 0xFF, sg = (fg >> 8) & 0xFF, sb = fg & 0xFF;
+                    uint8_t dr = (base >> 16) & 0xFF, dg = (base >> 8) & 0xFF, db = base & 0xFF;
+                    uint8_t alpha = (uint8_t)(neighbors * 40);
+                    uint8_t rr = (sr * alpha + dr * (255 - alpha)) / 255;
+                    uint8_t rg = (sg * alpha + dg * (255 - alpha)) / 255;
+                    uint8_t rb = (sb * alpha + db * (255 - alpha)) / 255;
+                    canvas[py * cw + px] = ((uint32_t)rr << 16) | ((uint32_t)rg << 8) | (uint32_t)rb;
+                }
             }
         }
     }
