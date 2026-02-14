@@ -19,6 +19,12 @@ static int      prev_mouse_buttons = 0;
 static int      start_menu_open = 0;
 static void   (*start_menu_callback)(int item) = (void *)0;
 
+/* Wallpaper cache to avoid expensive per-frame redraws */
+static uint32_t *wallpaper_cache = (void *)0;
+static int       wallpaper_dirty = 1;
+static theme_t   wallpaper_theme = THEME_BRUSHED_METAL;
+static uint32_t  wallpaper_w = 0, wallpaper_h = 0;
+
 /* ── Theme colour palettes ────────────────────────────────────────────── */
 typedef struct {
     uint32_t titlebar_top;
@@ -261,13 +267,13 @@ static void draw_window(window_t *win)
         }
     }
 
-    /* Unfocused window dimming overlay */
+    /* Unfocused window dimming overlay (lightweight: titlebar only) */
     if (!win->focused) {
-        for (int row = 0; row < h + TITLEBAR_H; row++) {
+        for (int row = 0; row < TITLEBAR_H; row++) {
             for (int col = 0; col < w; col++) {
                 int px = x + col, py = y + row;
                 uint32_t orig = fb_getpixel(px, py);
-                fb_putpixel(px, py, rgba_blend(orig, 0x000000, 40));
+                fb_putpixel(px, py, rgba_blend(orig, 0x000000, 30));
             }
         }
     }
@@ -278,16 +284,41 @@ void desktop_draw_wallpaper(void)
 {
     const theme_colors_t *tc = &themes[current_theme];
     framebuffer_t *f = fb_get();
-    draw_gradient_rect(0, 0, f->width, f->height, tc->desktop_top, tc->desktop_bot);
 
-    /* Subtle diagonal texture lines (skeuomorphic detail) */
-    for (int y = 0; y < (int)f->height; y += 6) {
-        for (int x = 0; x < (int)f->width; x++) {
-            if ((x + y) % 12 == 0) {
-                uint32_t px = fb_getpixel(x, y);
-                fb_putpixel(x, y, rgba_blend(px, 0xFFFFFF, 8));
+    /* Rebuild cache if theme changed or first render */
+    if (wallpaper_dirty || wallpaper_theme != current_theme ||
+        wallpaper_w != f->width || wallpaper_h != f->height) {
+        if (wallpaper_cache) kfree(wallpaper_cache);
+        wallpaper_w = f->width;
+        wallpaper_h = f->height;
+        wallpaper_cache = (uint32_t *)kmalloc(wallpaper_w * wallpaper_h * 4);
+        if (wallpaper_cache) {
+            for (uint32_t y = 0; y < wallpaper_h; y++) {
+                uint32_t c = lerp_color(tc->desktop_top, tc->desktop_bot, (int)y, (int)wallpaper_h);
+                for (uint32_t x = 0; x < wallpaper_w; x++) {
+                    wallpaper_cache[y * wallpaper_w + x] = c;
+                }
+            }
+            /* Subtle diagonal texture lines */
+            for (uint32_t y = 0; y < wallpaper_h; y += 6) {
+                for (uint32_t x = 0; x < wallpaper_w; x++) {
+                    if ((x + y) % 12 == 0) {
+                        uint32_t px = wallpaper_cache[y * wallpaper_w + x];
+                        wallpaper_cache[y * wallpaper_w + x] = rgba_blend(px, 0xFFFFFF, 8);
+                    }
+                }
             }
         }
+        wallpaper_theme = current_theme;
+        wallpaper_dirty = 0;
+    }
+
+    /* Fast blit cached wallpaper */
+    if (wallpaper_cache) {
+        fb_blit(0, 0, (int)wallpaper_w, (int)wallpaper_h, wallpaper_cache);
+    } else {
+        /* Fallback: direct draw */
+        draw_gradient_rect(0, 0, f->width, f->height, tc->desktop_top, tc->desktop_bot);
     }
 }
 
@@ -601,8 +632,10 @@ void compositor_init(void)
 
 void compositor_set_theme(theme_t theme)
 {
-    if (theme < THEME_COUNT)
+    if (theme < THEME_COUNT) {
         current_theme = theme;
+        wallpaper_dirty = 1;
+    }
 }
 
 theme_t compositor_get_theme(void)

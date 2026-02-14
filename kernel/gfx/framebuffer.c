@@ -318,13 +318,18 @@ void fb_swap(void)
 {
     if (fb.backbuffer == fb.address) return;
 
-    uint32_t *src = fb.backbuffer;
-    uint32_t *dst = fb.address;
-    uint32_t total = fb.width * fb.height;
+    /* Fast 64-bit copy for better throughput */
+    uint64_t *src = (uint64_t *)fb.backbuffer;
+    uint64_t *dst = (uint64_t *)fb.address;
+    uint32_t total = fb.width * fb.height / 2;  /* two 32-bit pixels per 64-bit word */
 
-    /* Fast copy (could use SSE/AVX in production) */
     for (uint32_t i = 0; i < total; i++) {
         dst[i] = src[i];
+    }
+    /* Handle odd pixel if width*height is odd */
+    if (fb.width * fb.height & 1) {
+        uint32_t last = fb.width * fb.height - 1;
+        fb.address[last] = fb.backbuffer[last];
     }
 }
 

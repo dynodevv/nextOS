@@ -88,6 +88,9 @@ void mouse_init(void)
 
     /* Use default settings and enable streaming */
     mouse_write(0xF6); mouse_wait_read(); inb(0x60);
+    /* Set sample rate to 200 for smoother tracking */
+    mouse_write(0xF3); mouse_wait_read(); inb(0x60);
+    mouse_write(200);  mouse_wait_read(); inb(0x60);
     mouse_write(0xF4); mouse_wait_read(); inb(0x60);
 
     irq_register_handler(44, mouse_irq);  /* IRQ12 -> vector 44 */

@@ -709,7 +709,7 @@ void kernel_main(uint64_t mb_info_addr)
             fb_swap();
         }
 
-        /* Target ~60 FPS (sleep ~16 ms between frames) */
-        timer_sleep_ms(16);
+        /* Target ~120 FPS for buttery-smooth experience */
+        timer_sleep_ms(8);
     }
 }
