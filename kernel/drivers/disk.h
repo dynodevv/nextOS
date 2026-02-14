@@ -18,6 +18,7 @@ typedef struct {
     disk_type_t type;
     uint16_t    io_base;     /* For ATA: I/O port base */
     uint64_t    mmio_base;   /* For AHCI/NVMe: MMIO BAR */
+    int         port_index;  /* For AHCI: port number (0-31) */
     uint64_t    total_sectors;
     int         present;
 } disk_device_t;
