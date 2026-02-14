@@ -1,0 +1,25 @@
+name: Setup nextOS Development Environment
+description: Pre-install build dependencies for nextOS kernel development
+
+steps:
+  - name: Update package list
+    run: sudo apt-get update
+
+  - name: Install build dependencies
+    run: |
+      sudo apt-get install -y \
+        build-essential \
+        nasm \
+        grub-pc-bin \
+        grub-common \
+        grub2-common \
+        grub-efi-amd64-bin \
+        xorriso \
+        mtools
+
+  - name: Verify toolchain
+    run: |
+      gcc --version
+      nasm --version
+      ld --version
+      grub-mkrescue --version
