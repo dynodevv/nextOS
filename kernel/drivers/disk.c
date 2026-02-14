@@ -31,6 +31,9 @@
 #define ATA_CMD_WRITE_SECTORS_EXT 0x34
 #define ATA_CMD_IDENTIFY          0xEC
 
+/* Timeout for ATA polling loops */
+#define ATA_TIMEOUT_LOOPS 100000
+
 /* ── PCI Configuration Space ─────────────────────────────────────────── */
 #define PCI_CONFIG_ADDR 0xCF8
 #define PCI_CONFIG_DATA 0xCFC
@@ -86,6 +89,12 @@ static void pci_write(uint8_t bus, uint8_t slot, uint8_t func, uint8_t off,
 /* PxSSTS DET field */
 #define AHCI_SSTS_DET_MASK  0x0F
 #define AHCI_SSTS_DET_OK    0x03  /* Device present and Phy communication established */
+
+/* PxSERR offset */
+#define AHCI_PxSERR  0x30  /* SATA Error */
+
+/* PxIS error bits */
+#define AHCI_IS_TFES (1u << 30)  /* Task File Error Status */
 
 /* PxTFD bits */
 #define AHCI_TFD_BSY (1 << 7)
@@ -166,14 +175,14 @@ static disk_device_t primary_disk;
  * ═══════════════════════════════════════════════════════════════════════ */
 static void ata_wait_bsy(uint16_t io)
 {
-    for (int t = 0; t < 100000; t++) {
+    for (int t = 0; t < ATA_TIMEOUT_LOOPS; t++) {
         if (!(inb(io + ATA_REG_STATUS) & ATA_SR_BSY)) return;
     }
 }
 
 static void ata_wait_drq(uint16_t io)
 {
-    for (int t = 0; t < 100000; t++) {
+    for (int t = 0; t < ATA_TIMEOUT_LOOPS; t++) {
         if (inb(io + ATA_REG_STATUS) & ATA_SR_DRQ) return;
     }
 }
@@ -210,7 +219,7 @@ static int ata_identify(disk_device_t *dev)
 
     /* Wait for DRQ with timeout */
     int drq_ok = 0;
-    for (int t = 0; t < 100000; t++) {
+    for (int t = 0; t < ATA_TIMEOUT_LOOPS; t++) {
         status = inb(io + ATA_REG_STATUS);
         if (status & ATA_SR_ERR) return 0;
         if (status & ATA_SR_DRQ) { drq_ok = 1; break; }
@@ -344,7 +353,8 @@ static uint64_t ahci_find_controller(void)
                     return (uint64_t)(bar5 & 0xFFFFF000);
                 }
 
-                /* Only scan func>0 if device is multi-function */
+                /* Only scan func>0 if function 0 is a multi-function device.
+                 * Per PCI spec, the multi-function bit is in function 0's header. */
                 if (func == 0) {
                     uint32_t hdr = pci_read(bus, slot, 0, 0x0C);
                     if (!((hdr >> 16) & 0x80)) break;  /* Not multi-function */
@@ -419,7 +429,7 @@ static void ahci_port_init(uint64_t abar, int port)
     ahci_write(abar, pb + AHCI_PxIS, 0xFFFFFFFF);
 
     /* Clear error bits in SError */
-    ahci_write(abar, pb + 0x30, 0xFFFFFFFF);  /* PxSERR */
+    ahci_write(abar, pb + AHCI_PxSERR, 0xFFFFFFFF);
 
     ahci_start_cmd(abar, port);
 }
@@ -477,7 +487,7 @@ static int ahci_issue_cmd(uint64_t abar, int port,
         uint32_t ci = ahci_read(abar, pb + AHCI_PxCI);
         if (!(ci & 1)) break;  /* Slot 0 completed */
         uint32_t is = ahci_read(abar, pb + AHCI_PxIS);
-        if (is & (1 << 30)) return -1;  /* Task file error */
+        if (is & AHCI_IS_TFES) return -1;  /* Task file error */
     }
 
     /* Check for errors */
