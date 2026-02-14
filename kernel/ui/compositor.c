@@ -129,6 +129,66 @@ static void draw_gradient_rect(int x, int y, int w, int h,
     }
 }
 
+/* ── Rounded rectangle helper ─────────────────────────────────────────── */
+/* Returns 1 if (col,row) is inside a rounded rect of size w x h with radius r */
+static int inside_rounded_rect(int col, int row, int w, int h, int r)
+{
+    /* Check corners */
+    if (col < r && row < r) {
+        int dx = r - col - 1, dy = r - row - 1;
+        return (dx * dx + dy * dy) <= (r * r);
+    }
+    if (col >= w - r && row < r) {
+        int dx = col - (w - r), dy = r - row - 1;
+        return (dx * dx + dy * dy) <= (r * r);
+    }
+    if (col < r && row >= h - r) {
+        int dx = r - col - 1, dy = row - (h - r);
+        return (dx * dx + dy * dy) <= (r * r);
+    }
+    if (col >= w - r && row >= h - r) {
+        int dx = col - (w - r), dy = row - (h - r);
+        return (dx * dx + dy * dy) <= (r * r);
+    }
+    return 1;
+}
+
+static void draw_rounded_gradient_rect(int x, int y, int w, int h, int r,
+                                       uint32_t top, uint32_t bot)
+{
+    for (int row = 0; row < h; row++) {
+        uint32_t c = lerp_color(top, bot, row, h);
+        for (int col = 0; col < w; col++) {
+            if (inside_rounded_rect(col, row, w, h, r))
+                fb_putpixel(x + col, y + row, c);
+        }
+    }
+}
+
+static void draw_rounded_rect_outline(int x, int y, int w, int h, int r, uint32_t color)
+{
+    /* Top edge (between corners) */
+    for (int col = r; col < w - r; col++) fb_putpixel(x + col, y, color);
+    /* Bottom edge */
+    for (int col = r; col < w - r; col++) fb_putpixel(x + col, y + h - 1, color);
+    /* Left edge */
+    for (int row = r; row < h - r; row++) fb_putpixel(x, y + row, color);
+    /* Right edge */
+    for (int row = r; row < h - r; row++) fb_putpixel(x + w - 1, y + row, color);
+    /* Corner arcs */
+    for (int dy = 0; dy < r; dy++) {
+        for (int dx = 0; dx < r; dx++) {
+            int d2 = (r - dx - 1) * (r - dx - 1) + (r - dy - 1) * (r - dy - 1);
+            if (d2 >= (r - 1) * (r - 1) && d2 <= r * r) {
+                fb_putpixel(x + dx, y + dy, color);             /* TL */
+                fb_putpixel(x + w - 1 - dx, y + dy, color);    /* TR */
+                fb_putpixel(x + dx, y + h - 1 - dy, color);    /* BL */
+                fb_putpixel(x + w - 1 - dx, y + h - 1 - dy, color); /* BR */
+            }
+        }
+    }
+}
+
 /* ── Drop shadow ──────────────────────────────────────────────────────── */
 static void draw_shadow(int x, int y, int w, int h, uint32_t color)
 {
@@ -193,6 +253,7 @@ static void str_cpy(char *d, const char *s)
 /* ── Draw a single window ─────────────────────────────────────────────── */
 #define TITLEBAR_H 28
 #define BORDER_W   2
+#define WIN_CORNER_R 6  /* Rounded corner radius for windows */
 
 static void draw_titlebar_circle(int cx, int cy, int r, uint32_t color)
 {
@@ -210,14 +271,15 @@ static void draw_window(window_t *win)
 
     const theme_colors_t *tc = &themes[current_theme];
     int x = win->x, y = win->y, w = win->width, h = win->height;
+    int total_h = h + TITLEBAR_H;
 
     /* Drop shadow */
-    draw_shadow(x, y, w, h + TITLEBAR_H, tc->shadow);
+    draw_shadow(x, y, w, total_h, tc->shadow);
 
-    /* Title bar gradient + gloss */
-    draw_gradient_rect(x, y, w, TITLEBAR_H, tc->titlebar_top, tc->titlebar_bot);
+    /* Title bar with rounded top corners */
+    draw_rounded_gradient_rect(x, y, w, TITLEBAR_H, WIN_CORNER_R,
+                               tc->titlebar_top, tc->titlebar_bot);
     draw_gloss(x, y, w, TITLEBAR_H);
-    draw_bevel(x, y, w, TITLEBAR_H, 1);
 
     /* Title text (centred) */
     int text_w = str_len(win->title) * 8;
@@ -247,13 +309,13 @@ static void draw_window(window_t *win)
     for (int i = -3; i <= 3; i++)
         fb_putpixel(min_cx + i, btn_y, 0xFFFFFF);
 
-    /* Client area border */
+    /* Client area */
     int cy = y + TITLEBAR_H;
     fb_fill_rect(x, cy, w, h, 0xF0F0F0);
-    draw_bevel(x, cy, w, h, 0);
 
-    /* Border */
-    fb_draw_rect(x - 1, y - 1, w + 2, h + TITLEBAR_H + 2, tc->border);
+    /* Rounded border for whole window */
+    draw_rounded_rect_outline(x - 1, y - 1, w + 2, total_h + 2,
+                              WIN_CORNER_R, tc->border);
 
     /* Blit client canvas onto the window's client area */
     if (win->canvas) {
@@ -352,25 +414,36 @@ static void draw_desktop_icon(int x, int y, const desktop_icon_t *icon, int sele
                      rgba_blend(0x4080C0, 0x000000, 80));
     }
 
-    /* Icon shadow */
-    fb_fill_rect(x + 3, y + 3, ICON_W, ICON_H, rgba_blend(0x000000, 0x000000, 60));
+    /* Icon shadow (rounded) */
+    for (int r = 0; r < ICON_H; r++) {
+        for (int col = 0; col < ICON_W; col++) {
+            if (inside_rounded_rect(col, r, ICON_W, ICON_H, 8))
+                fb_putpixel(x + col + 3, y + r + 3, rgba_blend(0x000000, 0x000000, 60));
+        }
+    }
 
-    /* Icon body (gradient square) */
+    /* Icon body (rounded gradient) */
+    #define ICON_R 8
     for (int r = 0; r < ICON_H; r++) {
         uint32_t c = lerp_color(icon->color, rgba_blend(icon->color, 0x000000, 80), r, ICON_H);
-        for (int col = 0; col < ICON_W; col++)
-            fb_putpixel(x + col, y + r, c);
+        for (int col = 0; col < ICON_W; col++) {
+            if (inside_rounded_rect(col, r, ICON_W, ICON_H, ICON_R))
+                fb_putpixel(x + col, y + r, c);
+        }
     }
     /* Gloss highlight on top half */
     for (int r = 0; r < ICON_H / 2; r++) {
         uint8_t alpha = 70 - (uint8_t)(r * 70 / (ICON_H / 2));
         for (int col = 0; col < ICON_W; col++) {
-            uint32_t px = fb_getpixel(x + col, y + r);
-            fb_putpixel(x + col, y + r, rgba_blend(px, 0xFFFFFF, alpha));
+            if (inside_rounded_rect(col, r, ICON_W, ICON_H, ICON_R)) {
+                uint32_t px = fb_getpixel(x + col, y + r);
+                fb_putpixel(x + col, y + r, rgba_blend(px, 0xFFFFFF, alpha));
+            }
         }
     }
-    /* Border */
-    fb_draw_rect(x, y, ICON_W, ICON_H, 0x303030);
+    /* Rounded border */
+    draw_rounded_rect_outline(x, y, ICON_W, ICON_H, ICON_R, 0x303030);
+    #undef ICON_R
 
     /* Draw icon-specific pixel art glyph */
     int cx = x + ICON_W / 2;
