@@ -35,6 +35,7 @@ static int         scrollbar_drag_offset = 0;
 #define DBLCLICK_MS 500
 static int         last_click_index = -1;
 static uint64_t    last_click_tick  = 0;
+static int         prev_buttons     = 0;  /* for edge detection */
 
 /* Context menu state */
 static int         ctx_menu_open = 0;
@@ -497,6 +498,9 @@ static void explorer_mouse(window_t *win, int mx, int my, int buttons)
     int list_y = 36;
     int list_h = ch - list_y - 24;
     int max_scroll = entry_count > VISIBLE_ROWS ? entry_count - VISIBLE_ROWS : 0;
+    int left_click = (buttons & 1) && !(prev_buttons & 1);  /* rising edge */
+    int right_click = (buttons & 2) && !(prev_buttons & 2);
+    prev_buttons = buttons;
     int file_x = SIDEBAR_W + 2;
 
     /* Handle scrollbar drag */
@@ -521,7 +525,7 @@ static void explorer_mouse(window_t *win, int mx, int my, int buttons)
     }
 
     /* Rename dialog click handling */
-    if (rename_dialog_active && (buttons & 1)) {
+    if (rename_dialog_active && left_click) {
         int dw = 280, dh = 90;
         int dx = (cw - dw) / 2, dy = (ch - dh) / 2;
         /* OK button */
@@ -552,7 +556,7 @@ static void explorer_mouse(window_t *win, int mx, int my, int buttons)
     }
 
     /* Right-click: open context menu */
-    if (buttons & 2) {
+    if (right_click) {
         if (my >= list_y && mx >= file_x) {
             int vi = (my - list_y) / ENTRY_HEIGHT;
             int ei = scroll_offset + vi;
@@ -574,7 +578,7 @@ static void explorer_mouse(window_t *win, int mx, int my, int buttons)
     }
 
     /* Left-click while context menu is open */
-    if ((buttons & 1) && ctx_menu_open) {
+    if (left_click && ctx_menu_open) {
         /* Check if click is inside context menu */
         int cmx = ctx_menu_x, cmy = ctx_menu_y;
         int cmw = 100;
@@ -713,7 +717,7 @@ static void explorer_mouse(window_t *win, int mx, int my, int buttons)
         return;
     }
 
-    if (!(buttons & 1)) return;
+    if (!left_click) return;
 
     /* Close context menu on any left click */
     ctx_menu_open = 0;

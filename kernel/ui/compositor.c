@@ -34,6 +34,7 @@ typedef struct {
     uint32_t shadow;
     uint32_t taskbar_top;
     uint32_t taskbar_bot;
+    uint32_t taskbar_text;
     uint32_t desktop_top;
     uint32_t desktop_bot;
     uint32_t button_top;
@@ -50,6 +51,7 @@ static const theme_colors_t themes[THEME_COUNT] = {
         .shadow        = 0x303030,
         .taskbar_top   = 0xB0B0B0,
         .taskbar_bot   = 0x707070,
+        .taskbar_text  = 0x1A1A1A,
         .desktop_top   = 0x4A6FA5,
         .desktop_bot   = 0x1B2838,
         .button_top    = 0xD0D0D0,
@@ -59,11 +61,12 @@ static const theme_colors_t themes[THEME_COUNT] = {
     [THEME_GLOSSY_GLASS] = {
         .titlebar_top  = 0xE8F0FF,
         .titlebar_bot  = 0x6090D0,
-        .titlebar_text = 0xFFFFFF,
+        .titlebar_text = 0x1A1A1A,
         .border        = 0x3060A0,
         .shadow        = 0x203050,
         .taskbar_top   = 0xD0E0F8,
         .taskbar_bot   = 0x5080C0,
+        .taskbar_text  = 0x1A1A1A,
         .desktop_top   = 0x2060B0,
         .desktop_bot   = 0x0A1A30,
         .button_top    = 0xC0D8F0,
@@ -78,6 +81,7 @@ static const theme_colors_t themes[THEME_COUNT] = {
         .shadow        = 0x101010,
         .taskbar_top   = 0x3A3A3A,
         .taskbar_bot   = 0x1A1A1A,
+        .taskbar_text  = 0xFFFFFF,
         .desktop_top   = 0x2A1A30,
         .desktop_bot   = 0x0A0510,
         .button_top    = 0x505050,
@@ -92,6 +96,7 @@ static const theme_colors_t themes[THEME_COUNT] = {
         .shadow        = 0x281808,
         .taskbar_top   = 0x986840,
         .taskbar_bot   = 0x583020,
+        .taskbar_text  = 0xFFFFFF,
         .desktop_top   = 0x4A6030,
         .desktop_bot   = 0x1A2810,
         .button_top    = 0xC08858,
@@ -583,7 +588,7 @@ static void draw_start_menu(void)
     for (int i = 0; i < START_MENU_ITEMS; i++) {
         int iy = my + 4 + i * START_MENU_ITEM_H;
         if (i >= 3) iy += separator_h;  /* offset items after separator */
-        fb_draw_string(mx + 12, iy + 8, start_menu_labels[i], 0x1A1A1A, 0x00000000);
+        fb_draw_string(mx + 12, iy + 8, start_menu_labels[i], tc->taskbar_text, 0x00000000);
         /* Separator line between items (but not after last) */
         if (i < START_MENU_ITEMS - 1 && i != 2) {
             for (int sx = mx + 4; sx < mx + START_MENU_W - 4; sx++)
@@ -637,7 +642,7 @@ void desktop_draw_taskbar(void)
             fb_putpixel(lx + 3 + c, ly + r, lc);
         }
     }
-    fb_draw_string(26, y + 12, "nextOS", 0x1A1A1A, 0x00000000);
+    fb_draw_string(26, y + 12, "nextOS", tc->taskbar_text, 0x00000000);
 
     /* Window buttons on taskbar */
     int bx = 110;
@@ -647,7 +652,7 @@ void desktop_draw_taskbar(void)
                            tc->button_top, tc->button_bot);
         draw_bevel(bx, y + 4, 120, TASKBAR_H - 8,
                    windows[i].focused ? 0 : 1);
-        fb_draw_string(bx + 8, y + 12, windows[i].title, 0x1A1A1A, 0x00000000);
+        fb_draw_string(bx + 8, y + 12, windows[i].title, tc->taskbar_text, 0x00000000);
         bx += 128;
     }
 }
