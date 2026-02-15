@@ -543,7 +543,6 @@ static void draw_desktop_icon(int x, int y, const desktop_icon_t *icon, int sele
                         (uint8_t)(100 * shade / 255),
                         (uint8_t)(200 * shade / 255));
                     /* Continent-like patches using simple pattern */
-                    int ax = dx + gr, ay = dy + gr;
                     int land = 0;
                     /* Americas-like landmass */
                     if (dx >= -8 && dx <= 0 && dy >= -14 && dy <= -4) land = 1;
@@ -553,7 +552,6 @@ static void draw_desktop_icon(int x, int y, const desktop_icon_t *icon, int sele
                     if (dx >= 8 && dx <= 16 && dy >= -2 && dy <= 10) land = 1;
                     /* Clip to circle */
                     if (d2 > (gr - 2) * (gr - 2)) land = 0;
-                    (void)ax; (void)ay;
                     if (land) {
                         ocean = rgb(
                             (uint8_t)(50 * shade / 255),

@@ -763,8 +763,7 @@ static int tls_send_client_hello(const char *host)
     int pos = 0;
     int host_len = str_len_ns(host);
 
-    /* TLS Record Header (filled later) */
-    int rec_start = pos;
+    /* TLS Record Header */
     msg[pos++] = TLS_HANDSHAKE;
     msg[pos++] = TLS_VER_MAJOR;
     msg[pos++] = 1;  /* TLS 1.0 in record layer for compat */
@@ -843,8 +842,6 @@ static int tls_send_client_hello(const char *host)
     msg[rec_len_pos] = (uint8_t)(rec_payload_len >> 8);
     msg[rec_len_pos + 1] = (uint8_t)(rec_payload_len & 0xFF);
 
-    (void)rec_start;
-
     return tcp_send_data(msg, pos);
 }
 
@@ -909,7 +906,7 @@ static int tls_receive_server_hello(void)
 int https_get(const char *host, uint16_t port, const char *path,
               char *response_buf, int buf_size)
 {
-    (void)path;  /* Used in HTTP request building after TLS is complete */
+    (void)path;  /* Path for future full TLS implementation */
     if (!net_is_available()) return -1;
 
     /* Resolve hostname */

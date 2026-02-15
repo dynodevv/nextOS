@@ -132,9 +132,13 @@ static void canvas_draw_char_bold(uint32_t *canvas, int cw, int ch,
 /* ── Browser State ───────────────────────────────────────────────────── */
 static window_t *browser_win = 0;
 
-#define URL_MAX 256
+#define URL_MAX      256
 #define PAGE_BUF_SIZE 32768
-#define TITLE_MAX 128
+#define TITLE_MAX    128
+#define TOOLBAR_H    32
+#define STATUS_H     20
+#define SCROLLBAR_W  14
+#define NAV_BTN_W    28
 
 static char url_bar[URL_MAX];
 static int  url_cursor = 0;
@@ -769,7 +773,7 @@ static void render_html(const char *html, int html_len,
     rs.x = 8;
     rs.y = 4;
     rs.start_x = 8;
-    rs.max_x = cw - 22;  /* Leave space for scrollbar */
+    rs.max_x = cw - SCROLLBAR_W - 8;  /* Leave space for scrollbar */
     rs.line_height = 18;
     rs.scroll = scroll;
     rs.bold = 0;
@@ -1043,10 +1047,6 @@ static void refresh_page(void)
 }
 
 /* ── Paint ───────────────────────────────────────────────────────────── */
-#define TOOLBAR_H  32
-#define STATUS_H   20
-#define SCROLLBAR_W 14
-#define NAV_BTN_W  28
 
 static void browser_paint(window_t *win)
 {
@@ -1129,9 +1129,9 @@ static void browser_paint(window_t *win)
     int start = 0;
     if (url_cursor > max_chars - 2)
         start = url_cursor - max_chars + 2;
-    for (int i2 = start; url_bar[i2] && (i2 - start) < max_chars; i2++) {
+    for (int ci = start; url_bar[ci] && (ci - start) < max_chars; ci++) {
         canvas_draw_char(win->canvas, cw, ch,
-                         url_x + 4 + (i2 - start) * 8, btn_y + 4, url_bar[i2], 0x1A1A1A);
+                         url_x + 4 + (ci - start) * 8, btn_y + 4, url_bar[ci], 0x1A1A1A);
     }
 
     /* Cursor blink */
