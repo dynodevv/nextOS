@@ -2,8 +2,8 @@
  * nextOS - tls_crypto.h
  * Cryptographic primitives for TLS 1.2
  *
- * Implements: SHA-256, HMAC-SHA-256, AES-128-CBC, RSA PKCS#1 v1.5,
- *             TLS PRF (pseudo-random function)
+ * Implements: SHA-256, SHA-1, HMAC-SHA-256, HMAC-SHA-1, AES-128-CBC,
+ *             RSA PKCS#1 v1.5, TLS PRF (pseudo-random function)
  */
 #ifndef NEXTOS_TLS_CRYPTO_H
 #define NEXTOS_TLS_CRYPTO_H
@@ -25,10 +25,30 @@ void sha256_update(sha256_ctx_t *ctx, const uint8_t *data, int len);
 void sha256_final(sha256_ctx_t *ctx, uint8_t digest[SHA256_DIGEST_SIZE]);
 void sha256(const uint8_t *data, int len, uint8_t digest[SHA256_DIGEST_SIZE]);
 
+/* SHA-1 */
+#define SHA1_BLOCK_SIZE  64
+#define SHA1_DIGEST_SIZE 20
+
+typedef struct {
+    uint32_t state[5];
+    uint64_t count;
+    uint8_t  buf[SHA1_BLOCK_SIZE];
+} sha1_ctx_t;
+
+void sha1_init(sha1_ctx_t *ctx);
+void sha1_update(sha1_ctx_t *ctx, const uint8_t *data, int len);
+void sha1_final(sha1_ctx_t *ctx, uint8_t digest[SHA1_DIGEST_SIZE]);
+void sha1(const uint8_t *data, int len, uint8_t digest[SHA1_DIGEST_SIZE]);
+
 /* HMAC-SHA-256 */
 void hmac_sha256(const uint8_t *key, int key_len,
                  const uint8_t *data, int data_len,
                  uint8_t out[SHA256_DIGEST_SIZE]);
+
+/* HMAC-SHA-1 */
+void hmac_sha1(const uint8_t *key, int key_len,
+               const uint8_t *data, int data_len,
+               uint8_t out[SHA1_DIGEST_SIZE]);
 
 /* TLS PRF (SHA-256 based) */
 void tls_prf_sha256(const uint8_t *secret, int secret_len,
