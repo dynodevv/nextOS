@@ -42,12 +42,6 @@ static uint32_t netmask     = 0;
 static uint32_t dns_server  = 0;
 static uint8_t  our_mac[6];
 
-/* Default DHCP-style config for common QEMU user networking */
-#define DEFAULT_IP       0x0A000202   /* 10.0.2.2 - but we use 10.0.2.15 */
-#define DEFAULT_GATEWAY  0x0A000202   /* 10.0.2.2 */
-#define DEFAULT_NETMASK  0xFFFFFF00   /* 255.255.255.0 */
-#define DEFAULT_DNS      0x0A000203   /* 10.0.2.3 */
-
 /* ── ARP Cache ───────────────────────────────────────────────────────── */
 #define ARP_CACHE_SIZE 16
 typedef struct {
