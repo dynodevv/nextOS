@@ -294,6 +294,7 @@ static uint32_t parse_html_color(const char *s)
 /* Named colors */
 static uint32_t named_color(const char *name)
 {
+    if (!name || !name[0]) return 0xFFFFFF;
     if (str_ncasecmp(name, "white", 5) == 0) return 0xFFFFFF;
     if (str_ncasecmp(name, "black", 5) == 0) return 0x000000;
     if (str_ncasecmp(name, "red", 3) == 0) return 0xFF0000;
@@ -305,6 +306,35 @@ static uint32_t named_color(const char *name)
     if (str_ncasecmp(name, "silver", 6) == 0) return 0xC0C0C0;
     if (str_ncasecmp(name, "navy", 4) == 0) return 0x000080;
     if (str_ncasecmp(name, "teal", 4) == 0) return 0x008080;
+    if (str_ncasecmp(name, "maroon", 6) == 0) return 0x800000;
+    if (str_ncasecmp(name, "olive", 5) == 0) return 0x808000;
+    if (str_ncasecmp(name, "aqua", 4) == 0) return 0x00FFFF;
+    if (str_ncasecmp(name, "cyan", 4) == 0) return 0x00FFFF;
+    if (str_ncasecmp(name, "fuchsia", 7) == 0) return 0xFF00FF;
+    if (str_ncasecmp(name, "magenta", 7) == 0) return 0xFF00FF;
+    if (str_ncasecmp(name, "lime", 4) == 0) return 0x00FF00;
+    if (str_ncasecmp(name, "purple", 6) == 0) return 0x800080;
+    if (str_ncasecmp(name, "orange", 6) == 0) return 0xFFA500;
+    if (str_ncasecmp(name, "pink", 4) == 0) return 0xFFC0CB;
+    if (str_ncasecmp(name, "brown", 5) == 0) return 0xA52A2A;
+    if (str_ncasecmp(name, "coral", 5) == 0) return 0xFF7F50;
+    if (str_ncasecmp(name, "crimson", 7) == 0) return 0xDC143C;
+    if (str_ncasecmp(name, "darkblue", 8) == 0) return 0x00008B;
+    if (str_ncasecmp(name, "darkgreen", 9) == 0) return 0x006400;
+    if (str_ncasecmp(name, "darkred", 7) == 0) return 0x8B0000;
+    if (str_ncasecmp(name, "gold", 4) == 0) return 0xFFD700;
+    if (str_ncasecmp(name, "indigo", 6) == 0) return 0x4B0082;
+    if (str_ncasecmp(name, "ivory", 5) == 0) return 0xFFFFF0;
+    if (str_ncasecmp(name, "khaki", 5) == 0) return 0xF0E68C;
+    if (str_ncasecmp(name, "lavender", 8) == 0) return 0xE6E6FA;
+    if (str_ncasecmp(name, "linen", 5) == 0) return 0xFAF0E6;
+    if (str_ncasecmp(name, "salmon", 6) == 0) return 0xFA8072;
+    if (str_ncasecmp(name, "tan", 3) == 0) return 0xD2B48C;
+    if (str_ncasecmp(name, "tomato", 6) == 0) return 0xFF6347;
+    if (str_ncasecmp(name, "violet", 6) == 0) return 0xEE82EE;
+    if (str_ncasecmp(name, "wheat", 5) == 0) return 0xF5DEB3;
+    if (str_ncasecmp(name, "lightgr", 7) == 0) return 0xD3D3D3;
+    if (str_ncasecmp(name, "darkgr", 6) == 0) return 0xA9A9A9;
     if (name[0] == '#') return parse_html_color(name);
     return 0xFFFFFF;
 }
@@ -404,9 +434,12 @@ static void handle_tag(const char *tag, int tag_len)
     int i = 0;
     if (tag[0] == '/') { is_close = 1; i = 1; }
 
+    /* Skip <!DOCTYPE ...> and other declarations */
+    if (tag[0] == '!') return;
+
     char name[16];
     int ni = 0;
-    while (i < tag_len && ni < 15 && tag[i] != ' ' && tag[i] != '>')  {
+    while (i < tag_len && ni < 15 && tag[i] != ' ' && tag[i] != '>' && tag[i] != '/')  {
         name[ni++] = tag[i++];
         /* Convert to lowercase */
         if (name[ni-1] >= 'A' && name[ni-1] <= 'Z')
@@ -415,9 +448,9 @@ static void handle_tag(const char *tag, int tag_len)
     name[ni] = 0;
 
     /* Self-closing tags */
-    if (str_cmp(name, "br") == 0 || str_cmp(name, "br/") == 0) {
+    if (str_cmp(name, "br") == 0) {
         render_newline();
-    } else if (str_cmp(name, "hr") == 0 || str_cmp(name, "hr/") == 0) {
+    } else if (str_cmp(name, "hr") == 0) {
         render_newline();
         int draw_y = rs.y - rs.scroll + 8;
         if (draw_y >= 0 && draw_y < rs.ch)
@@ -448,28 +481,49 @@ static void handle_tag(const char *tag, int tag_len)
     } else if (str_cmp(name, "input") == 0) {
         /* Input field visual placeholder */
         if (!is_close) {
-            char type[32], value[64], placeholder[64];
+            char type[32], value[64], placeholder[64], size_str[16];
             if (!get_attr(tag, tag_len, "type", type, sizeof(type)))
                 str_cpy(type, "text");
             if (!get_attr(tag, tag_len, "value", value, sizeof(value)))
                 value[0] = 0;
             if (!get_attr(tag, tag_len, "placeholder", placeholder, sizeof(placeholder)))
                 placeholder[0] = 0;
+            if (!get_attr(tag, tag_len, "size", size_str, sizeof(size_str)))
+                size_str[0] = 0;
+
+            /* Hidden inputs should not be rendered */
+            if (str_ncasecmp(type, "hidden", 6) == 0) return;
+
             int draw_y = rs.y - rs.scroll;
             if (draw_y >= -20 && draw_y < rs.ch) {
                 if (str_ncasecmp(type, "submit", 6) == 0 || str_ncasecmp(type, "button", 6) == 0) {
                     /* Button-style input */
                     const char *label = value[0] ? value : "Submit";
                     int bw = str_len(label) * 8 + 16;
+                    /* Button with 3D look */
                     fill_rect(rs.canvas, rs.cw, rs.ch, rs.x, draw_y, bw, 22, 0xE0E0E0);
-                    draw_hline(rs.canvas, rs.cw, rs.ch, rs.x, draw_y, bw, 0xA0A0A0);
-                    draw_hline(rs.canvas, rs.cw, rs.ch, rs.x, draw_y + 21, bw, 0xA0A0A0);
+                    draw_hline(rs.canvas, rs.cw, rs.ch, rs.x, draw_y, bw, 0xF0F0F0);
+                    draw_hline(rs.canvas, rs.cw, rs.ch, rs.x, draw_y + 21, bw, 0x808080);
+                    /* Left/right borders */
+                    for (int by = draw_y; by < draw_y + 22 && by < rs.ch; by++) {
+                        if (by >= 0) {
+                            if (rs.x >= 0 && rs.x < rs.cw) rs.canvas[by * rs.cw + rs.x] = 0xF0F0F0;
+                            if (rs.x+bw-1 >= 0 && rs.x+bw-1 < rs.cw) rs.canvas[by * rs.cw + rs.x+bw-1] = 0x808080;
+                        }
+                    }
                     canvas_draw_string(rs.canvas, rs.cw, rs.ch, rs.x + 8, draw_y + 3, label, 0x1A1A1A);
                     rs.x += bw + 4;
                 } else if (str_ncasecmp(type, "checkbox", 8) == 0) {
                     fill_rect(rs.canvas, rs.cw, rs.ch, rs.x, draw_y + 2, 14, 14, 0xFFFFFF);
                     draw_hline(rs.canvas, rs.cw, rs.ch, rs.x, draw_y + 2, 14, 0x808080);
                     draw_hline(rs.canvas, rs.cw, rs.ch, rs.x, draw_y + 15, 14, 0x808080);
+                    /* Vertical borders */
+                    for (int by = draw_y + 2; by <= draw_y + 15 && by < rs.ch; by++) {
+                        if (by >= 0) {
+                            if (rs.x >= 0 && rs.x < rs.cw) rs.canvas[by * rs.cw + rs.x] = 0x808080;
+                            if (rs.x+13 >= 0 && rs.x+13 < rs.cw) rs.canvas[by * rs.cw + rs.x+13] = 0x808080;
+                        }
+                    }
                     rs.x += 18;
                 } else if (str_ncasecmp(type, "radio", 5) == 0) {
                     /* Radio button as a circle */
@@ -485,13 +539,27 @@ static void handle_tag(const char *tag, int tag_len)
                                 if (rcy+dy2 >= 0 && rcy+dy2 < rs.ch && rcx+dx2 >= 0 && rcx+dx2 < rs.cw)
                                     rs.canvas[(rcy+dy2)*rs.cw + rcx+dx2] = 0xFFFFFF;
                     rs.x += 18;
+                } else if (str_ncasecmp(type, "image", 5) == 0) {
+                    /* Image input: render as a small button */
+                    fill_rect(rs.canvas, rs.cw, rs.ch, rs.x, draw_y, 40, 22, 0xE0E0E0);
+                    canvas_draw_string(rs.canvas, rs.cw, rs.ch, rs.x + 4, draw_y + 3, "[Go]", 0x1A1A1A);
+                    rs.x += 44;
                 } else {
-                    /* Text input field */
+                    /* Text-like input field */
                     int fw = 150;
+                    /* Respect size attribute */
+                    if (size_str[0]) {
+                        int sz = 0;
+                        for (int si = 0; size_str[si] >= '0' && size_str[si] <= '9'; si++)
+                            sz = sz * 10 + (size_str[si] - '0');
+                        if (sz > 0 && sz < 80) fw = sz * 8 + 8;
+                    }
+                    if (rs.x + fw > rs.max_x) fw = rs.max_x - rs.x - 4;
+                    if (fw < 24) fw = 24;
                     fill_rect(rs.canvas, rs.cw, rs.ch, rs.x, draw_y, fw, 22, 0xFFFFFF);
+                    /* Full border */
                     draw_hline(rs.canvas, rs.cw, rs.ch, rs.x, draw_y, fw, 0x808080);
                     draw_hline(rs.canvas, rs.cw, rs.ch, rs.x, draw_y + 21, fw, 0x808080);
-                    /* Left/right borders */
                     for (int by = draw_y; by < draw_y + 22 && by < rs.ch; by++) {
                         if (by >= 0) {
                             if (rs.x >= 0 && rs.x < rs.cw) rs.canvas[by * rs.cw + rs.x] = 0x808080;
@@ -499,23 +567,42 @@ static void handle_tag(const char *tag, int tag_len)
                         }
                     }
                     const char *txt = value[0] ? value : placeholder;
-                    if (txt[0])
+                    if (txt[0]) {
+                        /* Clip text to field width */
+                        int max_txt = (fw - 8) / 8;
+                        if (max_txt < 1) max_txt = 1;
+                        char clipped[80];
+                        int ci2 = 0;
+                        while (txt[ci2] && ci2 < max_txt && ci2 < 79)
+                            { clipped[ci2] = txt[ci2]; ci2++; }
+                        clipped[ci2] = 0;
                         canvas_draw_string(rs.canvas, rs.cw, rs.ch, rs.x + 4, draw_y + 3,
-                                           txt, value[0] ? 0x1A1A1A : 0xA0A0A0);
+                                           clipped, value[0] ? 0x1A1A1A : 0xA0A0A0);
+                    }
                     rs.x += fw + 4;
                 }
             }
         }
     } else if (str_cmp(name, "button") == 0) {
         if (!is_close) {
-            /* Will render content as button label */
+            /* Draw button background; content will render on top */
             int draw_y = rs.y - rs.scroll;
             if (draw_y >= -20 && draw_y < rs.ch) {
-                fill_rect(rs.canvas, rs.cw, rs.ch, rs.x, draw_y, 4, 22, 0xE0E0E0);
+                /* 3D raised button look */
+                int bw = 80;
+                fill_rect(rs.canvas, rs.cw, rs.ch, rs.x, draw_y, bw, 22, 0xE0E0E0);
+                draw_hline(rs.canvas, rs.cw, rs.ch, rs.x, draw_y, bw, 0xF0F0F0);
+                draw_hline(rs.canvas, rs.cw, rs.ch, rs.x, draw_y + 21, bw, 0x808080);
+                for (int by = draw_y; by < draw_y + 22 && by < rs.ch; by++) {
+                    if (by >= 0) {
+                        if (rs.x >= 0 && rs.x < rs.cw) rs.canvas[by * rs.cw + rs.x] = 0xF0F0F0;
+                        if (rs.x+bw-1 >= 0 && rs.x+bw-1 < rs.cw) rs.canvas[by * rs.cw + rs.x+bw-1] = 0x808080;
+                    }
+                }
             }
-            rs.x += 8;
+            rs.x += 4;
         } else {
-            rs.x += 8;
+            rs.x += 4;
         }
     /* Block-level tags */
     } else if (str_cmp(name, "p") == 0) {
@@ -558,20 +645,23 @@ static void handle_tag(const char *tag, int tag_len)
     /* Inline formatting tags */
     } else if (str_cmp(name, "b") == 0 || str_cmp(name, "strong") == 0) {
         rs.bold = !is_close;
-    } else if (str_cmp(name, "i") == 0 || str_cmp(name, "em") == 0) {
+    } else if (str_cmp(name, "i") == 0 || str_cmp(name, "em") == 0 || str_cmp(name, "cite") == 0 || str_cmp(name, "address") == 0) {
         rs.italic = !is_close;
     } else if (str_cmp(name, "u") == 0 || str_cmp(name, "ins") == 0) {
         rs.underline = !is_close;
     } else if (str_cmp(name, "s") == 0 || str_cmp(name, "strike") == 0 || str_cmp(name, "del") == 0) {
         rs.strikethrough = !is_close;
-    } else if (str_cmp(name, "small") == 0) {
-        /* Small text: we can't really change font size, just note it */
-        (void)is_close;
-    } else if (str_cmp(name, "big") == 0) {
-        (void)is_close;
-    } else if (str_cmp(name, "sup") == 0) {
-        (void)is_close;  /* Superscript: difficult with bitmap font */
-    } else if (str_cmp(name, "sub") == 0) {
+    } else if (str_cmp(name, "small") == 0 || str_cmp(name, "big") == 0 ||
+               str_cmp(name, "sup") == 0 || str_cmp(name, "sub") == 0 ||
+               str_cmp(name, "abbr") == 0 || str_cmp(name, "q") == 0 ||
+               str_cmp(name, "nobr") == 0 || str_cmp(name, "wbr") == 0 ||
+               str_cmp(name, "mark") == 0 || str_cmp(name, "var") == 0 ||
+               str_cmp(name, "kbd") == 0 || str_cmp(name, "samp") == 0 ||
+               str_cmp(name, "dfn") == 0 || str_cmp(name, "bdi") == 0 ||
+               str_cmp(name, "bdo") == 0 || str_cmp(name, "time") == 0 ||
+               str_cmp(name, "data") == 0 || str_cmp(name, "ruby") == 0 ||
+               str_cmp(name, "rt") == 0 || str_cmp(name, "rp") == 0) {
+        /* Inline tags we recognize but handle as pass-through (content renders) */
         (void)is_close;
     } else if (str_cmp(name, "a") == 0) {
         if (is_close) {
@@ -603,6 +693,9 @@ static void handle_tag(const char *tag, int tag_len)
         rs.in_style = !is_close;
     } else if (str_cmp(name, "script") == 0) {
         rs.in_script = !is_close;
+    } else if (str_cmp(name, "noscript") == 0) {
+        /* Render noscript content (since we don't support JS) */
+        (void)is_close;
     } else if (str_cmp(name, "body") == 0) {
         if (!is_close) {
             rs.in_body = 1;
@@ -616,6 +709,10 @@ static void handle_tag(const char *tag, int tag_len)
             char text_val[32];
             if (get_attr(tag, tag_len, "text", text_val, sizeof(text_val))) {
                 rs.text_color = named_color(text_val);
+            }
+            char link_val[32];
+            if (get_attr(tag, tag_len, "link", link_val, sizeof(link_val))) {
+                rs.link_color = named_color(link_val);
             }
         }
     /* Heading tags */
@@ -708,9 +805,23 @@ static void handle_tag(const char *tag, int tag_len)
             if (col_w < 60) col_w = 60;
             rs.table_col_x += col_w;
         }
+    } else if (str_cmp(name, "caption") == 0) {
+        if (!is_close) { render_newline(); rs.bold = 1; rs.centered = 1; }
+        else { rs.bold = 0; rs.centered = 0; render_newline(); }
+    } else if (str_cmp(name, "thead") == 0 || str_cmp(name, "tbody") == 0 ||
+               str_cmp(name, "tfoot") == 0 || str_cmp(name, "colgroup") == 0 ||
+               str_cmp(name, "col") == 0) {
+        /* Table structure tags: just continue */
+        (void)is_close;
     /* Form tags (visual only) */
     } else if (str_cmp(name, "form") == 0) {
         if (!is_close) render_newline();
+    } else if (str_cmp(name, "fieldset") == 0) {
+        if (!is_close) { render_newline(); rs.start_x += 10; rs.x = rs.start_x; }
+        else { rs.start_x -= 10; render_newline(); }
+    } else if (str_cmp(name, "legend") == 0) {
+        if (!is_close) { rs.bold = 1; }
+        else { rs.bold = 0; render_newline(); }
     } else if (str_cmp(name, "textarea") == 0) {
         if (!is_close) {
             int draw_y = rs.y - rs.scroll;
@@ -742,23 +853,124 @@ static void handle_tag(const char *tag, int tag_len)
                 rs.x += sw + 4;
             }
         }
-    } else if (str_cmp(name, "option") == 0) {
-        /* Skip option content visually */
+    } else if (str_cmp(name, "option") == 0 || str_cmp(name, "optgroup") == 0) {
+        /* Skip option/optgroup content visually */
     } else if (str_cmp(name, "label") == 0) {
         /* Label: just render content normally */
+    /* HTML5 semantic block tags - treat as block */
+    } else if (str_cmp(name, "section") == 0 || str_cmp(name, "article") == 0 ||
+               str_cmp(name, "header") == 0 || str_cmp(name, "footer") == 0 ||
+               str_cmp(name, "nav") == 0 || str_cmp(name, "main") == 0 ||
+               str_cmp(name, "aside") == 0 || str_cmp(name, "details") == 0 ||
+               str_cmp(name, "summary") == 0 || str_cmp(name, "figure") == 0 ||
+               str_cmp(name, "figcaption") == 0) {
+        render_newline();
+    /* Tags to skip content for */
+    } else if (str_cmp(name, "iframe") == 0 || str_cmp(name, "object") == 0 ||
+               str_cmp(name, "embed") == 0 || str_cmp(name, "applet") == 0 ||
+               str_cmp(name, "video") == 0 || str_cmp(name, "audio") == 0 ||
+               str_cmp(name, "canvas") == 0 || str_cmp(name, "svg") == 0) {
+        if (!is_close) {
+            /* Show placeholder */
+            int draw_y = rs.y - rs.scroll;
+            if (draw_y >= -20 && draw_y < rs.ch) {
+                canvas_draw_string(rs.canvas, rs.cw, rs.ch, rs.x, draw_y + 3,
+                                   "[embedded content]", 0xA0A0A0);
+            }
+            rs.x += 150;
+        }
+    /* Map, area ignored */
+    } else if (str_cmp(name, "map") == 0 || str_cmp(name, "area") == 0) {
+        (void)is_close;
     }
-    /* Other tags we silently ignore: meta, link, noscript, etc. */
+    /* All unknown tags are silently ignored */
 }
 
 /* Decode HTML entities */
 static char decode_entity(const char *s, int *advance)
 {
+    /* Named entities */
     if (str_ncmp(s, "&amp;", 5) == 0) { *advance = 5; return '&'; }
     if (str_ncmp(s, "&lt;", 4) == 0) { *advance = 4; return '<'; }
     if (str_ncmp(s, "&gt;", 4) == 0) { *advance = 4; return '>'; }
     if (str_ncmp(s, "&nbsp;", 6) == 0) { *advance = 6; return ' '; }
     if (str_ncmp(s, "&quot;", 6) == 0) { *advance = 6; return '"'; }
     if (str_ncmp(s, "&apos;", 6) == 0) { *advance = 6; return '\''; }
+    if (str_ncasecmp(s, "&copy;", 6) == 0) { *advance = 6; return 'c'; }
+    if (str_ncasecmp(s, "&reg;", 5) == 0) { *advance = 5; return 'R'; }
+    if (str_ncasecmp(s, "&trade;", 7) == 0) { *advance = 7; return 'T'; }
+    if (str_ncasecmp(s, "&mdash;", 7) == 0) { *advance = 7; return '-'; }
+    if (str_ncasecmp(s, "&ndash;", 7) == 0) { *advance = 7; return '-'; }
+    if (str_ncasecmp(s, "&laquo;", 7) == 0) { *advance = 7; return '<'; }
+    if (str_ncasecmp(s, "&raquo;", 7) == 0) { *advance = 7; return '>'; }
+    if (str_ncasecmp(s, "&ldquo;", 7) == 0) { *advance = 7; return '"'; }
+    if (str_ncasecmp(s, "&rdquo;", 7) == 0) { *advance = 7; return '"'; }
+    if (str_ncasecmp(s, "&lsquo;", 7) == 0) { *advance = 7; return '\''; }
+    if (str_ncasecmp(s, "&rsquo;", 7) == 0) { *advance = 7; return '\''; }
+    if (str_ncasecmp(s, "&bull;", 6) == 0) { *advance = 6; return '*'; }
+    if (str_ncasecmp(s, "&middot;", 8) == 0) { *advance = 8; return '.'; }
+    if (str_ncasecmp(s, "&hellip;", 8) == 0) { *advance = 8; return '.'; }
+    if (str_ncasecmp(s, "&rarr;", 6) == 0) { *advance = 6; return '>'; }
+    if (str_ncasecmp(s, "&larr;", 6) == 0) { *advance = 6; return '<'; }
+    if (str_ncasecmp(s, "&times;", 7) == 0) { *advance = 7; return 'x'; }
+    if (str_ncasecmp(s, "&divide;", 8) == 0) { *advance = 8; return '/'; }
+    if (str_ncasecmp(s, "&deg;", 5) == 0) { *advance = 5; return 'o'; }
+    if (str_ncasecmp(s, "&pound;", 7) == 0) { *advance = 7; return '#'; }
+    if (str_ncasecmp(s, "&euro;", 6) == 0) { *advance = 6; return 'E'; }
+    if (str_ncasecmp(s, "&cent;", 6) == 0) { *advance = 6; return 'c'; }
+    if (str_ncasecmp(s, "&yen;", 5) == 0) { *advance = 5; return 'Y'; }
+    if (str_ncasecmp(s, "&iquest;", 8) == 0) { *advance = 8; return '?'; }
+    if (str_ncasecmp(s, "&iexcl;", 7) == 0) { *advance = 7; return '!'; }
+    if (str_ncasecmp(s, "&frac12;", 8) == 0) { *advance = 8; return '/'; }
+    if (str_ncasecmp(s, "&frac14;", 8) == 0) { *advance = 8; return '/'; }
+    if (str_ncasecmp(s, "&frac34;", 8) == 0) { *advance = 8; return '/'; }
+    if (str_ncasecmp(s, "&para;", 6) == 0) { *advance = 6; return 'P'; }
+    if (str_ncasecmp(s, "&sect;", 6) == 0) { *advance = 6; return 'S'; }
+
+    /* Numeric character references: &#NNN; or &#xHH; */
+    if (s[1] == '#') {
+        int val = 0;
+        int pos = 2;
+        if (s[pos] == 'x' || s[pos] == 'X') {
+            pos++;
+            while (s[pos] && s[pos] != ';' && pos < 10) {
+                char c = s[pos];
+                if (c >= '0' && c <= '9') val = val * 16 + (c - '0');
+                else if (c >= 'a' && c <= 'f') val = val * 16 + (c - 'a' + 10);
+                else if (c >= 'A' && c <= 'F') val = val * 16 + (c - 'A' + 10);
+                else break;
+                pos++;
+            }
+        } else {
+            while (s[pos] >= '0' && s[pos] <= '9' && pos < 10) {
+                val = val * 10 + (s[pos] - '0');
+                pos++;
+            }
+        }
+        if (s[pos] == ';') pos++;
+        *advance = pos;
+        /* Map to printable ASCII or substitute */
+        if (val >= 32 && val <= 126) return (char)val;
+        if (val == 160) return ' ';  /* non-breaking space */
+        if (val == 169) return 'c';  /* copyright */
+        if (val == 174) return 'R';  /* registered */
+        if (val == 8211 || val == 8212) return '-';  /* en/em dash */
+        if (val == 8216 || val == 8217) return '\''; /* smart quotes */
+        if (val == 8220 || val == 8221) return '"';  /* double smart quotes */
+        if (val == 8226) return '*';  /* bullet */
+        if (val == 8230) return '.';  /* ellipsis */
+        if (val == 8364) return 'E';  /* euro */
+        return '?';
+    }
+
+    /* Unknown entity: try to skip to semicolon */
+    int pos = 1;
+    while (s[pos] && s[pos] != ';' && s[pos] != ' ' && s[pos] != '<' && pos < 10)
+        pos++;
+    if (s[pos] == ';') {
+        *advance = pos + 1;
+        return '?';
+    }
     *advance = 1;
     return '&';
 }
@@ -863,7 +1075,9 @@ static void render_html(const char *html, int html_len,
                         /* Collapse to single space */
                         if (rs.x > rs.start_x) render_char(' ');
                     }
-                } else if (c >= 32 && c <= 126) {
+                } else if (c >= 32) {
+                    /* Render printable chars; map non-ASCII to '?' */
+                    if (c > 126) c = '?';
                     render_char(c);
                 }
             }

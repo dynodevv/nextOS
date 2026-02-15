@@ -718,16 +718,18 @@ int http_get(const char *host, uint16_t port, const char *path,
     return body_len;
 }
 
-/* ── TLS 1.2 Minimal Client ─────────────────────────────────────────── */
+/* ── TLS 1.2 Client ──────────────────────────────────────────────────── */
 /*
- * Minimal TLS 1.2 implementation for HTTPS support.
- * Sends a ClientHello and processes the handshake.
- * Uses TLS_RSA_WITH_AES_128_CBC_SHA (0x002F) cipher suite.
+ * Full TLS 1.2 implementation for HTTPS support.
+ * Uses TLS_RSA_WITH_AES_128_CBC_SHA256 (0x003C) cipher suite.
  *
- * Note: This is a simplified implementation suitable for connecting
- * to basic HTTPS servers. It handles the TLS record layer and
- * handshake protocol enough to establish encrypted communication.
+ * Implements complete handshake:
+ *   ClientHello -> ServerHello,Certificate,ServerHelloDone ->
+ *   ClientKeyExchange,ChangeCipherSpec,Finished ->
+ *   ChangeCipherSpec,Finished
+ * Then encrypted application data for HTTP request/response.
  */
+#include "tls_crypto.h"
 
 /* TLS record types */
 #define TLS_CHANGE_CIPHER  20
@@ -747,21 +749,55 @@ int http_get(const char *host, uint16_t port, const char *path,
 #define TLS_VER_MAJOR 3
 #define TLS_VER_MINOR 3
 
-/* Simple pseudo-random using timer ticks */
-static uint32_t tls_rand(void)
+/* TLS session state */
+static uint8_t tls_client_random[32];
+static uint8_t tls_server_random[32];
+static uint8_t tls_master_secret[48];
+static uint8_t tls_client_write_key[16];
+static uint8_t tls_server_write_key[16];
+static uint8_t tls_client_write_iv[16];
+static uint8_t tls_server_write_iv[16];
+static uint8_t tls_client_write_mac_key[32];
+static uint8_t tls_server_write_mac_key[32];
+static uint64_t tls_client_seq;
+static uint64_t tls_server_seq;
+
+/* Handshake message accumulator for Finished verification */
+#define TLS_HS_BUF_SIZE 8192
+static uint8_t tls_hs_buf[TLS_HS_BUF_SIZE];
+static int tls_hs_len;
+
+static void tls_hs_accumulate(const uint8_t *data, int len)
 {
-    static uint32_t tls_seed = 0x12345678;
-    tls_seed ^= (uint32_t)timer_get_ticks();
-    tls_seed = tls_seed * 1103515245 + 12345;
-    return tls_seed;
+    if (tls_hs_len + len <= TLS_HS_BUF_SIZE) {
+        mem_copy(tls_hs_buf + tls_hs_len, data, len);
+        tls_hs_len += len;
+    }
 }
+
+/* Server certificate buffer */
+#define TLS_CERT_BUF_SIZE 4096
+static uint8_t tls_cert_buf[TLS_CERT_BUF_SIZE];
+static int tls_cert_len;
+
+/* Large receive buffer for TLS records */
+#define TLS_RECV_BUF_SIZE 8192
+static uint8_t tls_recv_buf[TLS_RECV_BUF_SIZE];
 
 /* Build and send TLS ClientHello */
 static int tls_send_client_hello(const char *host)
 {
-    uint8_t msg[256];
+    uint8_t msg[512];
     int pos = 0;
     int host_len = str_len_ns(host);
+
+    /* Generate client random */
+    uint32_t ts = (uint32_t)(timer_get_ticks() / 1000);
+    tls_client_random[0] = (ts >> 24) & 0xFF;
+    tls_client_random[1] = (ts >> 16) & 0xFF;
+    tls_client_random[2] = (ts >> 8) & 0xFF;
+    tls_client_random[3] = ts & 0xFF;
+    tls_random_bytes(tls_client_random + 4, 28);
 
     /* TLS Record Header */
     msg[pos++] = TLS_HANDSHAKE;
@@ -782,23 +818,17 @@ static int tls_send_client_hello(const char *host)
     msg[pos++] = TLS_VER_MINOR;
 
     /* Random (32 bytes) */
-    uint32_t ts = (uint32_t)(timer_get_ticks() / 1000);
-    msg[pos++] = (ts >> 24) & 0xFF;
-    msg[pos++] = (ts >> 16) & 0xFF;
-    msg[pos++] = (ts >> 8) & 0xFF;
-    msg[pos++] = ts & 0xFF;
-    for (int i = 0; i < 28; i++) {
-        msg[pos++] = (uint8_t)(tls_rand() & 0xFF);
-    }
+    mem_copy(msg + pos, tls_client_random, 32);
+    pos += 32;
 
     /* Session ID length = 0 */
     msg[pos++] = 0;
 
-    /* Cipher suites */
+    /* Cipher suites - offer AES_128_CBC_SHA256 primarily */
     msg[pos++] = 0; msg[pos++] = 6;  /* 3 cipher suites = 6 bytes */
+    msg[pos++] = 0x00; msg[pos++] = 0x3C;  /* TLS_RSA_WITH_AES_128_CBC_SHA256 */
     msg[pos++] = 0x00; msg[pos++] = 0x2F;  /* TLS_RSA_WITH_AES_128_CBC_SHA */
     msg[pos++] = 0x00; msg[pos++] = 0x35;  /* TLS_RSA_WITH_AES_256_CBC_SHA */
-    msg[pos++] = 0x00; msg[pos++] = 0x3C;  /* TLS_RSA_WITH_AES_128_CBC_SHA256 */
 
     /* Compression methods */
     msg[pos++] = 1;  /* 1 method */
@@ -806,32 +836,39 @@ static int tls_send_client_hello(const char *host)
 
     /* Extensions */
     int ext_len_pos = pos;
-    pos += 2;  /* Extensions length placeholder */
+    pos += 2;
     int ext_start = pos;
 
-    /* SNI extension (Server Name Indication) */
-    msg[pos++] = 0x00; msg[pos++] = 0x00;  /* Extension type: SNI */
+    /* SNI extension */
+    msg[pos++] = 0x00; msg[pos++] = 0x00;
     int sni_len_pos = pos;
-    pos += 2;  /* Extension data length */
+    pos += 2;
     int sni_start = pos;
     msg[pos++] = (uint8_t)((host_len + 3) >> 8);
-    msg[pos++] = (uint8_t)((host_len + 3) & 0xFF);  /* Server name list length */
-    msg[pos++] = 0;  /* Host name type */
+    msg[pos++] = (uint8_t)((host_len + 3) & 0xFF);
+    msg[pos++] = 0;
     msg[pos++] = (uint8_t)(host_len >> 8);
     msg[pos++] = (uint8_t)(host_len & 0xFF);
-    for (int i = 0; i < host_len && pos < (int)sizeof(msg) - 10; i++)
+    for (int i = 0; i < host_len && pos < (int)sizeof(msg) - 30; i++)
         msg[pos++] = (uint8_t)host[i];
-    /* Fill SNI length */
     int sni_data_len = pos - sni_start;
     msg[sni_len_pos] = (uint8_t)(sni_data_len >> 8);
     msg[sni_len_pos + 1] = (uint8_t)(sni_data_len & 0xFF);
+
+    /* Signature algorithms extension (required for TLS 1.2) */
+    msg[pos++] = 0x00; msg[pos++] = 0x0d;  /* signature_algorithms */
+    msg[pos++] = 0x00; msg[pos++] = 0x08;  /* extension length */
+    msg[pos++] = 0x00; msg[pos++] = 0x06;  /* list length */
+    msg[pos++] = 0x04; msg[pos++] = 0x01;  /* RSA/PKCS1/SHA256 */
+    msg[pos++] = 0x05; msg[pos++] = 0x01;  /* RSA/PKCS1/SHA384 */
+    msg[pos++] = 0x02; msg[pos++] = 0x01;  /* RSA/PKCS1/SHA1 */
 
     /* Fill extensions length */
     int ext_len = pos - ext_start;
     msg[ext_len_pos] = (uint8_t)(ext_len >> 8);
     msg[ext_len_pos + 1] = (uint8_t)(ext_len & 0xFF);
 
-    /* Fill handshake length (3 bytes, big-endian) */
+    /* Fill handshake length */
     int hello_len = pos - hello_start;
     msg[hs_len_pos] = 0;
     msg[hs_len_pos + 1] = (uint8_t)(hello_len >> 8);
@@ -842,71 +879,393 @@ static int tls_send_client_hello(const char *host)
     msg[rec_len_pos] = (uint8_t)(rec_payload_len >> 8);
     msg[rec_len_pos + 1] = (uint8_t)(rec_payload_len & 0xFF);
 
+    /* Accumulate handshake message (without record header) */
+    tls_hs_len = 0;
+    tls_hs_accumulate(msg + hs_start, rec_payload_len);
+
     return tcp_send_data(msg, pos);
 }
 
-/* Wait for TLS ServerHello, Certificate, ServerHelloDone */
-static int tls_receive_server_hello(void)
+/* Read a full TLS record from TCP. Returns record body length or -1 */
+static int tls_read_record(uint8_t *out_type, uint8_t *buf, int buf_size)
 {
-    uint8_t buf[4096];
-    int total = tcp_receive_data(buf, sizeof(buf), 8000);
-    if (total < 5) return -1;
+    uint8_t hdr[5];
+    int got = tcp_receive_data(hdr, 5, 8000);
+    if (got < 5) return -1;
 
-    /* Parse TLS records - look for ServerHelloDone */
-    int rpos = 0;
-    while (rpos + 5 <= total) {
-        uint8_t rec_type = buf[rpos];
-        int rec_len = (buf[rpos + 3] << 8) | buf[rpos + 4];
+    *out_type = hdr[0];
+    int rec_len = (hdr[3] << 8) | hdr[4];
+    if (rec_len > buf_size) return -1;
+    if (rec_len <= 0) return 0;
 
-        if (rec_type == TLS_ALERT) {
-            return -1;  /* Alert = failure */
-        }
+    /* Read record body */
+    int total = 0;
+    int remaining = rec_len;
+    while (remaining > 0) {
+        int chunk = tcp_receive_data(buf + total, remaining, 5000);
+        if (chunk <= 0) break;
+        total += chunk;
+        remaining -= chunk;
+    }
+    return total;
+}
 
-        if (rec_type == TLS_HANDSHAKE && rpos + 5 + rec_len <= total) {
-            /* Scan handshake messages within record */
-            int hpos = rpos + 5;
-            int hend = rpos + 5 + rec_len;
-            while (hpos + 4 <= hend) {
-                uint8_t hs_type = buf[hpos];
-                int hs_len = (buf[hpos + 1] << 16) | (buf[hpos + 2] << 8) | buf[hpos + 3];
-                if (hs_type == TLS_SERVER_DONE) {
-                    return 0;  /* Success: got ServerHelloDone */
+/* Process server handshake: ServerHello, Certificate, ServerHelloDone */
+static int tls_process_server_handshake(rsa_pubkey_t *server_key)
+{
+    int got_hello = 0, got_cert = 0, got_done = 0;
+    tls_cert_len = 0;
+
+    while (!got_done) {
+        uint8_t rec_type;
+        int rec_len = tls_read_record(&rec_type, tls_recv_buf, TLS_RECV_BUF_SIZE);
+        if (rec_len < 0) return -1;
+
+        if (rec_type == TLS_ALERT) return -1;
+
+        if (rec_type == TLS_HANDSHAKE) {
+            /* Accumulate for Finished hash */
+            tls_hs_accumulate(tls_recv_buf, rec_len);
+
+            /* Parse handshake messages within record */
+            int hpos = 0;
+            while (hpos + 4 <= rec_len) {
+                uint8_t hs_type = tls_recv_buf[hpos];
+                int hs_len = ((int)tls_recv_buf[hpos+1] << 16) |
+                             ((int)tls_recv_buf[hpos+2] << 8) |
+                             tls_recv_buf[hpos+3];
+
+                if (hpos + 4 + hs_len > rec_len) break;
+
+                if (hs_type == TLS_SERVER_HELLO) {
+                    /* Extract server random (bytes 2-33 of hello body) */
+                    if (hs_len >= 34) {
+                        mem_copy(tls_server_random, tls_recv_buf + hpos + 6, 32);
+                    }
+                    got_hello = 1;
+                } else if (hs_type == TLS_CERTIFICATE) {
+                    /* Extract first certificate */
+                    if (hs_len > 6) {
+                        int certs_total = ((int)tls_recv_buf[hpos+4] << 16) |
+                                          ((int)tls_recv_buf[hpos+5] << 8) |
+                                          tls_recv_buf[hpos+6];
+                        (void)certs_total;
+                        /* First cert length */
+                        if (hs_len > 9) {
+                            int cert_len = ((int)tls_recv_buf[hpos+7] << 16) |
+                                           ((int)tls_recv_buf[hpos+8] << 8) |
+                                           tls_recv_buf[hpos+9];
+                            if (cert_len > 0 && cert_len <= TLS_CERT_BUF_SIZE &&
+                                hpos + 10 + cert_len <= rec_len) {
+                                mem_copy(tls_cert_buf, tls_recv_buf + hpos + 10, cert_len);
+                                tls_cert_len = cert_len;
+                            }
+                        }
+                    }
+                    got_cert = 1;
+                } else if (hs_type == TLS_SERVER_DONE) {
+                    got_done = 1;
                 }
+
                 hpos += 4 + hs_len;
             }
         }
-
-        rpos += 5 + rec_len;
     }
 
-    /* Didn't find ServerHelloDone yet, try reading more */
-    int more = tcp_receive_data(buf, sizeof(buf), 5000);
-    if (more > 0) {
-        rpos = 0;
-        while (rpos + 5 <= more) {
-            uint8_t rec_type = buf[rpos];
-            int rec_len = (buf[rpos + 3] << 8) | buf[rpos + 4];
-            if (rec_type == TLS_HANDSHAKE && rpos + 5 + rec_len <= more) {
-                int hpos = rpos + 5;
-                int hend = rpos + 5 + rec_len;
-                while (hpos + 4 <= hend) {
-                    uint8_t hs_type = buf[hpos];
-                    int hs_len = (buf[hpos + 1] << 16) | (buf[hpos + 2] << 8) | buf[hpos + 3];
-                    if (hs_type == TLS_SERVER_DONE) return 0;
-                    hpos += 4 + hs_len;
-                }
+    if (!got_hello || !got_cert) return -1;
+    if (tls_cert_len == 0) return -1;
+
+    /* Extract RSA public key from certificate */
+    if (rsa_extract_pubkey(tls_cert_buf, tls_cert_len, server_key) != 0)
+        return -1;
+    if (server_key->mod_len == 0)
+        return -1;
+
+    return 0;
+}
+
+/* Derive master secret and key material */
+static void tls_derive_keys(const uint8_t *pre_master_secret)
+{
+    /* master_secret = PRF(pre_master_secret, "master secret",
+     *                     ClientHello.random + ServerHello.random) */
+    uint8_t seed[64];
+    mem_copy(seed, tls_client_random, 32);
+    mem_copy(seed + 32, tls_server_random, 32);
+    tls_prf_sha256(pre_master_secret, 48, "master secret", seed, 64,
+                   tls_master_secret, 48);
+
+    /* key_block = PRF(master_secret, "key expansion",
+     *                 server_random + client_random) */
+    uint8_t ks_seed[64];
+    mem_copy(ks_seed, tls_server_random, 32);
+    mem_copy(ks_seed + 32, tls_client_random, 32);
+
+    /* For AES_128_CBC_SHA256: mac_key=32, enc_key=16, IV=16 per side
+     * Total: 2*(32+16+16) = 128 bytes */
+    uint8_t key_block[128];
+    tls_prf_sha256(tls_master_secret, 48, "key expansion", ks_seed, 64,
+                   key_block, 128);
+
+    int off = 0;
+    mem_copy(tls_client_write_mac_key, key_block + off, 32); off += 32;
+    mem_copy(tls_server_write_mac_key, key_block + off, 32); off += 32;
+    mem_copy(tls_client_write_key, key_block + off, 16); off += 16;
+    mem_copy(tls_server_write_key, key_block + off, 16); off += 16;
+    mem_copy(tls_client_write_iv, key_block + off, 16); off += 16;
+    mem_copy(tls_server_write_iv, key_block + off, 16);
+
+    tls_client_seq = 0;
+    tls_server_seq = 0;
+}
+
+/* Send ClientKeyExchange: encrypt pre-master secret with server's RSA key */
+static int tls_send_client_key_exchange(const rsa_pubkey_t *server_key)
+{
+    /* Generate 48-byte pre-master secret */
+    uint8_t pms[48];
+    pms[0] = TLS_VER_MAJOR;
+    pms[1] = TLS_VER_MINOR;
+    tls_random_bytes(pms + 2, 46);
+
+    /* RSA PKCS#1 encrypt */
+    uint8_t encrypted[RSA_MAX_MOD_BYTES];
+    int enc_len = rsa_pkcs1_encrypt(server_key, pms, 48, encrypted, sizeof(encrypted));
+    if (enc_len < 0) return -1;
+
+    /* Derive keys from pre-master secret */
+    tls_derive_keys(pms);
+
+    /* Build ClientKeyExchange handshake message */
+    int msg_len = 4 + 2 + enc_len;  /* HS header(4) + length prefix(2) + encrypted */
+    uint8_t *msg = (uint8_t *)kmalloc(5 + msg_len);
+    if (!msg) return -1;
+
+    int pos = 0;
+    /* TLS record header */
+    msg[pos++] = TLS_HANDSHAKE;
+    msg[pos++] = TLS_VER_MAJOR;
+    msg[pos++] = TLS_VER_MINOR;
+    msg[pos++] = (uint8_t)(msg_len >> 8);
+    msg[pos++] = (uint8_t)(msg_len & 0xFF);
+
+    int hs_start = pos;
+    /* Handshake type */
+    msg[pos++] = TLS_CLIENT_KEY_EX;
+    /* Length (3 bytes) */
+    int body_len = 2 + enc_len;
+    msg[pos++] = 0;
+    msg[pos++] = (uint8_t)(body_len >> 8);
+    msg[pos++] = (uint8_t)(body_len & 0xFF);
+
+    /* Encrypted pre-master secret length (2 bytes) */
+    msg[pos++] = (uint8_t)(enc_len >> 8);
+    msg[pos++] = (uint8_t)(enc_len & 0xFF);
+    mem_copy(msg + pos, encrypted, enc_len);
+    pos += enc_len;
+
+    /* Accumulate handshake message */
+    tls_hs_accumulate(msg + hs_start, msg_len);
+
+    int ret = tcp_send_data(msg, pos);
+    kfree(msg);
+    return ret;
+}
+
+/* Send ChangeCipherSpec */
+static int tls_send_change_cipher_spec(void)
+{
+    uint8_t msg[6];
+    msg[0] = TLS_CHANGE_CIPHER;
+    msg[1] = TLS_VER_MAJOR;
+    msg[2] = TLS_VER_MINOR;
+    msg[3] = 0;
+    msg[4] = 1;  /* Length = 1 */
+    msg[5] = 1;  /* ChangeCipherSpec message */
+    return tcp_send_data(msg, 6);
+}
+
+/* Compute MAC for a TLS record (HMAC-SHA-256) */
+static void tls_compute_mac(const uint8_t *mac_key,
+                            uint64_t seq_num, uint8_t rec_type,
+                            const uint8_t *data, int data_len,
+                            uint8_t mac_out[32])
+{
+    /* MAC input: seq_num(8) + type(1) + version(2) + length(2) + data */
+    uint8_t mac_input[13 + 16384];
+    int mi = 0;
+    /* Sequence number (8 bytes big-endian) */
+    for (int i = 7; i >= 0; i--)
+        mac_input[mi++] = (seq_num >> (i * 8)) & 0xFF;
+    mac_input[mi++] = rec_type;
+    mac_input[mi++] = TLS_VER_MAJOR;
+    mac_input[mi++] = TLS_VER_MINOR;
+    mac_input[mi++] = (uint8_t)(data_len >> 8);
+    mac_input[mi++] = (uint8_t)(data_len & 0xFF);
+    if (data_len <= 16384) {
+        mem_copy(mac_input + mi, data, data_len);
+        mi += data_len;
+    }
+    hmac_sha256(mac_key, 32, mac_input, mi, mac_out);
+}
+
+/* Send encrypted TLS record */
+static int tls_send_encrypted(uint8_t rec_type, const uint8_t *data, int data_len)
+{
+    /* Build plaintext: data + MAC + padding */
+    uint8_t mac[32];
+    tls_compute_mac(tls_client_write_mac_key, tls_client_seq,
+                    rec_type, data, data_len, mac);
+
+    int plain_len = data_len + 32;  /* data + MAC */
+    /* PKCS#7 padding for AES-CBC */
+    int pad = 16 - (plain_len % 16);
+    int total_plain = plain_len + pad;
+
+    /* Generate random IV (16 bytes) */
+    uint8_t iv[16];
+    tls_random_bytes(iv, 16);
+
+    /* Plaintext buffer: data + mac + padding */
+    uint8_t *pt = (uint8_t *)kmalloc(total_plain);
+    if (!pt) return -1;
+    mem_copy(pt, data, data_len);
+    mem_copy(pt + data_len, mac, 32);
+    for (int i = 0; i < pad; i++)
+        pt[plain_len + i] = (uint8_t)(pad - 1);  /* TLS padding value = pad_len - 1 */
+
+    /* Encrypt with AES-128-CBC (no PKCS#7 since we added TLS padding) */
+    uint8_t *ct = (uint8_t *)kmalloc(total_plain);
+    if (!ct) { kfree(pt); return -1; }
+
+    /* Manual CBC encrypt (TLS padding is different from PKCS#7) */
+    aes128_ctx_t aes_ctx;
+    aes128_init(&aes_ctx, tls_client_write_key);
+    uint8_t prev[16];
+    mem_copy(prev, iv, 16);
+    for (int i = 0; i < total_plain; i += 16) {
+        uint8_t block[16];
+        mem_copy(block, pt + i, 16);
+        for (int j = 0; j < 16; j++) block[j] ^= prev[j];
+        aes128_encrypt_block(&aes_ctx, block, ct + i);
+        mem_copy(prev, ct + i, 16);
+    }
+
+    /* TLS record: record header(5) + IV(16) + ciphertext */
+    int rec_payload = 16 + total_plain;
+    uint8_t *rec = (uint8_t *)kmalloc(5 + rec_payload);
+    if (!rec) { kfree(pt); kfree(ct); return -1; }
+
+    rec[0] = rec_type;
+    rec[1] = TLS_VER_MAJOR;
+    rec[2] = TLS_VER_MINOR;
+    rec[3] = (uint8_t)(rec_payload >> 8);
+    rec[4] = (uint8_t)(rec_payload & 0xFF);
+    mem_copy(rec + 5, iv, 16);
+    mem_copy(rec + 5 + 16, ct, total_plain);
+
+    int ret = tcp_send_data(rec, 5 + rec_payload);
+
+    tls_client_seq++;
+    kfree(pt);
+    kfree(ct);
+    kfree(rec);
+    return ret;
+}
+
+/* Decrypt a TLS record */
+static int tls_decrypt_record(const uint8_t *data, int data_len,
+                              uint8_t *out, int max_out)
+{
+    if (data_len < 32) return -1;  /* Need at least IV(16) + one block(16) */
+
+    const uint8_t *iv = data;
+    const uint8_t *ct = data + 16;
+    int ct_len = data_len - 16;
+
+    if (ct_len % 16 != 0) return -1;
+    if (ct_len > max_out) return -1;
+
+    /* Decrypt AES-128-CBC */
+    aes128_ctx_t aes_ctx;
+    aes128_init(&aes_ctx, tls_server_write_key);
+    const uint8_t *prev = iv;
+    for (int i = 0; i < ct_len; i += 16) {
+        uint8_t block[16];
+        aes128_decrypt_block(&aes_ctx, ct + i, block);
+        for (int j = 0; j < 16; j++) block[j] ^= prev[j];
+        mem_copy(out + i, block, 16);
+        prev = ct + i;
+    }
+
+    /* Remove TLS padding */
+    int pad_val = out[ct_len - 1];
+    int pad_count = pad_val + 1;
+    if (pad_count > ct_len) return -1;
+
+    int content_plus_mac = ct_len - pad_count;
+    /* MAC is 32 bytes (SHA-256) */
+    if (content_plus_mac < 32) return -1;
+    int content_len = content_plus_mac - 32;
+
+    tls_server_seq++;
+    return content_len;
+}
+
+/* Send Finished message */
+static int tls_send_finished(void)
+{
+    /* Compute verify_data = PRF(master_secret, "client finished",
+     *                           SHA-256(handshake_messages))[0..11] */
+    uint8_t hs_hash[32];
+    sha256(tls_hs_buf, tls_hs_len, hs_hash);
+
+    uint8_t verify_data[12];
+    tls_prf_sha256(tls_master_secret, 48, "client finished",
+                   hs_hash, 32, verify_data, 12);
+
+    /* Build Finished handshake message */
+    uint8_t finished[16];
+    finished[0] = TLS_FINISHED;
+    finished[1] = 0;
+    finished[2] = 0;
+    finished[3] = 12;
+    mem_copy(finished + 4, verify_data, 12);
+
+    return tls_send_encrypted(TLS_HANDSHAKE, finished, 16);
+}
+
+/* Wait for server's ChangeCipherSpec + Finished */
+static int tls_receive_server_finished(void)
+{
+    int got_ccs = 0, got_finished = 0;
+
+    while (!got_finished) {
+        uint8_t rec_type;
+        int rec_len = tls_read_record(&rec_type, tls_recv_buf, TLS_RECV_BUF_SIZE);
+        if (rec_len < 0) return -1;
+
+        if (rec_type == TLS_ALERT) return -1;
+
+        if (rec_type == TLS_CHANGE_CIPHER) {
+            got_ccs = 1;
+        } else if (rec_type == TLS_HANDSHAKE && got_ccs) {
+            /* This should be encrypted Finished - decrypt it */
+            uint8_t pt[256];
+            int pt_len = tls_decrypt_record(tls_recv_buf, rec_len, pt, sizeof(pt));
+            if (pt_len >= 0) {
+                got_finished = 1;
+            } else {
+                return -1;
             }
-            rpos += 5 + rec_len;
         }
     }
-
-    return -1;
+    return 0;
 }
 
 int https_get(const char *host, uint16_t port, const char *path,
               char *response_buf, int buf_size)
 {
-    (void)path;  /* Path for future full TLS implementation */
     if (!net_is_available()) return -1;
 
     /* Resolve hostname */
@@ -917,29 +1276,25 @@ int https_get(const char *host, uint16_t port, const char *path,
     if (tcp_connect(ip, port) != 0)
         return -1;
 
-    /* Send TLS ClientHello */
+    /* Step 1: Send ClientHello */
     if (tls_send_client_hello(host) < 0) {
         tcp_close();
         return -1;
     }
 
-    /* Receive server handshake */
-    if (tls_receive_server_hello() < 0) {
+    /* Step 2: Receive ServerHello, Certificate, ServerHelloDone */
+    rsa_pubkey_t server_key;
+    if (tls_process_server_handshake(&server_key) != 0) {
         tcp_close();
-        /*
-         * TLS handshake failed. This is expected since our minimal TLS
-         * implementation doesn't support the full key exchange.
-         * Return an informative error page.
-         */
+        /* Return error page */
         int len = 0;
         const char *err =
             "<html><body bgcolor=\"#FFFFF0\">"
-            "<h1>HTTPS Not Fully Supported</h1>"
-            "<p>nextOS connected to the server but could not complete "
-            "the TLS handshake.</p>"
-            "<p>The server requires TLS cipher suites or extensions that "
-            "nextOS does not yet support.</p>"
-            "<p>Try using <b>http://</b> instead, or visit a simpler server.</p>"
+            "<h1>HTTPS Handshake Failed</h1>"
+            "<p>Could not complete the TLS handshake with the server.</p>"
+            "<p>The server may require cipher suites or TLS extensions "
+            "that nextOS does not support.</p>"
+            "<p>Try using <b>http://</b> instead if available.</p>"
             "</body></html>";
         for (int i = 0; err[i] && len < buf_size - 1; i++)
             response_buf[len++] = err[i];
@@ -947,28 +1302,130 @@ int https_get(const char *host, uint16_t port, const char *path,
         return len;
     }
 
-    /*
-     * If we reach here, the server accepted our ClientHello and sent
-     * ServerHelloDone. A full implementation would continue with
-     * ClientKeyExchange, ChangeCipherSpec, and Finished.
-     * For now, close and return informative content.
-     */
+    /* Step 3: Send ClientKeyExchange (RSA encrypted pre-master secret) */
+    if (tls_send_client_key_exchange(&server_key) < 0) {
+        tcp_close();
+        return -1;
+    }
+
+    /* Step 4: Send ChangeCipherSpec */
+    if (tls_send_change_cipher_spec() < 0) {
+        tcp_close();
+        return -1;
+    }
+
+    /* Step 5: Send Finished */
+    if (tls_send_finished() < 0) {
+        tcp_close();
+        return -1;
+    }
+
+    /* Step 6: Receive server's ChangeCipherSpec + Finished */
+    if (tls_receive_server_finished() != 0) {
+        tcp_close();
+        int len = 0;
+        const char *err =
+            "<html><body bgcolor=\"#FFFFF0\">"
+            "<h1>HTTPS Encryption Failed</h1>"
+            "<p>TLS handshake was completed but the server's Finished "
+            "message could not be verified.</p>"
+            "<p>Try using <b>http://</b> instead if available.</p>"
+            "</body></html>";
+        for (int i = 0; err[i] && len < buf_size - 1; i++)
+            response_buf[len++] = err[i];
+        response_buf[len] = 0;
+        return len;
+    }
+
+    /* Step 7: Send HTTP request over TLS */
+    char request[512];
+    int rpos = 0;
+    const char *get = "GET ";
+    for (int i = 0; get[i]; i++) request[rpos++] = get[i];
+    for (int i = 0; path[i]; i++) request[rpos++] = path[i];
+    const char *ver = " HTTP/1.1\r\nHost: ";
+    for (int i = 0; ver[i]; i++) request[rpos++] = ver[i];
+    for (int i = 0; host[i]; i++) request[rpos++] = host[i];
+    const char *hdr = "\r\nConnection: close\r\nUser-Agent: nextOS/2.5.0\r\nAccept: text/html,*/*\r\n\r\n";
+    for (int i = 0; hdr[i]; i++) request[rpos++] = hdr[i];
+    request[rpos] = 0;
+
+    if (tls_send_encrypted(TLS_APPLICATION, (uint8_t *)request, rpos) < 0) {
+        tcp_close();
+        return -1;
+    }
+
+    /* Step 8: Receive encrypted HTTP response */
+    int total_body = 0;
+    int header_done = 0;
+    int body_start_off = 0;
+
+    for (int attempt = 0; attempt < 20 && total_body < buf_size - 1; attempt++) {
+        uint8_t rec_type;
+        int rec_len = tls_read_record(&rec_type, tls_recv_buf, TLS_RECV_BUF_SIZE);
+        if (rec_len <= 0) break;
+
+        if (rec_type == TLS_ALERT) break;
+
+        if (rec_type == TLS_APPLICATION) {
+            uint8_t pt[TLS_RECV_BUF_SIZE];
+            int pt_len = tls_decrypt_record(tls_recv_buf, rec_len, pt, sizeof(pt));
+            if (pt_len <= 0) break;
+
+            if (!header_done) {
+                /* Find end of HTTP headers */
+                int temp_start = total_body;
+                int copy_len = pt_len;
+                if (temp_start + copy_len >= buf_size) copy_len = buf_size - temp_start - 1;
+                mem_copy(response_buf + temp_start, pt, copy_len);
+                total_body += copy_len;
+                response_buf[total_body] = 0;
+
+                /* Search for \r\n\r\n in accumulated data */
+                for (int i = 0; i < total_body - 3; i++) {
+                    if (response_buf[i] == '\r' && response_buf[i+1] == '\n' &&
+                        response_buf[i+2] == '\r' && response_buf[i+3] == '\n') {
+                        body_start_off = i + 4;
+                        header_done = 1;
+                        /* Move body to start */
+                        int body_len = total_body - body_start_off;
+                        for (int j = 0; j < body_len; j++)
+                            response_buf[j] = response_buf[body_start_off + j];
+                        total_body = body_len;
+                        response_buf[total_body] = 0;
+                        break;
+                    }
+                }
+            } else {
+                /* Append decrypted data */
+                int copy_len = pt_len;
+                if (total_body + copy_len >= buf_size) copy_len = buf_size - total_body - 1;
+                if (copy_len > 0) {
+                    mem_copy(response_buf + total_body, pt, copy_len);
+                    total_body += copy_len;
+                }
+            }
+        }
+    }
+
+    response_buf[total_body] = 0;
     tcp_close();
 
-    int len = 0;
-    const char *msg2 =
-        "<html><body bgcolor=\"#F0FFF0\">"
-        "<h1>HTTPS Connection Initiated</h1>"
-        "<p>nextOS successfully negotiated TLS with the server.</p>"
-        "<p>Full encrypted data transfer requires additional "
-        "cryptographic operations (AES, RSA, SHA) that are being "
-        "developed for a future nextOS update.</p>"
-        "<p>For now, please use <b>http://</b> URLs for full page loading.</p>"
-        "</body></html>";
-    for (int i = 0; msg2[i] && len < buf_size - 1; i++)
-        response_buf[len++] = msg2[i];
-    response_buf[len] = 0;
-    return len;
+    /* If we got no body at all, return error */
+    if (total_body == 0) {
+        const char *err =
+            "<html><body bgcolor=\"#FFFFF0\">"
+            "<h1>Empty HTTPS Response</h1>"
+            "<p>The server did not return any content.</p>"
+            "</body></html>";
+        int len = 0;
+        for (int i = 0; err[i] && len < buf_size - 1; i++)
+            response_buf[len++] = err[i];
+        response_buf[len] = 0;
+        return len;
+    }
+
+    return total_body;
 }
 
 /* ── Initialization ──────────────────────────────────────────────────── */

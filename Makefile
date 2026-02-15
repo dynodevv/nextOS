@@ -41,6 +41,7 @@ C_SRCS  := kernel/kernel.c \
            kernel/fs/ext2.c \
            kernel/fs/ramfs.c \
            kernel/net/net_stack.c \
+           kernel/net/tls_crypto.c \
            kernel/ui/compositor.c \
            apps/settings/settings.c \
            apps/explorer/explorer.c \
