@@ -532,8 +532,8 @@ static void ramfs_load_from_disk(void)
         /* Read data */
         uint32_t data_sectors = (de->size + 511) / 512;
         if (de->size > 0) {
-            entries[slot].data = (uint8_t *)kmalloc(de->size + 512);
-            entries[slot].capacity = de->size + 512;
+            entries[slot].data = (uint8_t *)kmalloc(de->size);
+            entries[slot].capacity = de->size;
             if (!entries[slot].data) {
                 entries[slot].size = 0;
                 entries[slot].capacity = 0;

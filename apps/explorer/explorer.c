@@ -527,6 +527,7 @@ static void explorer_mouse(window_t *win, int mx, int my, int buttons)
                 int ni = 0;
                 const char *cp = current_path;
                 while (*cp && ni < PATH_MAX_LEN - 1) new_path[ni++] = *cp++;
+                if (ni > 0 && new_path[ni - 1] != '/' && ni < PATH_MAX_LEN - 1) new_path[ni++] = '/';
                 const char *rn = rename_input;
                 while (*rn && ni < PATH_MAX_LEN - 1) new_path[ni++] = *rn++;
                 new_path[ni] = 0;
@@ -583,6 +584,7 @@ static void explorer_mouse(window_t *win, int mx, int my, int buttons)
                     int di = 0;
                     const char *cp = current_path;
                     while (*cp && di < PATH_MAX_LEN - 1) dest_path[di++] = *cp++;
+                    if (di > 0 && dest_path[di - 1] != '/' && di < PATH_MAX_LEN - 1) dest_path[di++] = '/';
                     cp = clipboard_name;
                     while (*cp && di < PATH_MAX_LEN - 1) dest_path[di++] = *cp++;
                     dest_path[di] = 0;
@@ -668,6 +670,7 @@ static void explorer_mouse(window_t *win, int mx, int my, int buttons)
                         int di = 0;
                         const char *cp = current_path;
                         while (*cp && di < PATH_MAX_LEN - 1) dest_path[di++] = *cp++;
+                        if (di > 0 && dest_path[di - 1] != '/' && di < PATH_MAX_LEN - 1) dest_path[di++] = '/';
                         cp = clipboard_name;
                         while (*cp && di < PATH_MAX_LEN - 1) dest_path[di++] = *cp++;
                         dest_path[di] = 0;
@@ -806,6 +809,7 @@ static void explorer_key(window_t *win, char ascii, int scancode, int pressed)
                 int ni = 0;
                 const char *cp = current_path;
                 while (*cp && ni < PATH_MAX_LEN - 1) new_path[ni++] = *cp++;
+                if (ni > 0 && new_path[ni - 1] != '/' && ni < PATH_MAX_LEN - 1) new_path[ni++] = '/';
                 const char *rn = rename_input;
                 while (*rn && ni < PATH_MAX_LEN - 1) new_path[ni++] = *rn++;
                 new_path[ni] = 0;
