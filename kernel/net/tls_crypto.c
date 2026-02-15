@@ -224,6 +224,10 @@ void hmac_sha256(const uint8_t *key, int key_len,
     sha256_update(&ctx, k_pad, 64);
     sha256_update(&ctx, inner, 32);
     sha256_final(&ctx, out);
+
+    mz(k_pad, 64);
+    mz(inner, 32);
+    mz(tk, 32);
 }
 
 /* ── HMAC-SHA-1 ──────────────────────────────────────────────────────── */
