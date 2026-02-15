@@ -329,9 +329,9 @@ static void draw_window(window_t *win)
         }
     }
 
-    /* Unfocused window dimming overlay (lightweight: titlebar only) */
+    /* Unfocused window dimming overlay (entire window) */
     if (!win->focused) {
-        for (int row = 0; row < TITLEBAR_H; row++) {
+        for (int row = 0; row < total_h; row++) {
             for (int col = 0; col < w; col++) {
                 int px = x + col, py = y + row;
                 uint32_t orig = fb_getpixel(px, py);
@@ -844,6 +844,7 @@ static void resize_canvas(window_t *w, int new_w, int new_h)
 void compositor_handle_mouse(int mx, int my, int buttons)
 {
     int click = (buttons & 1) && !(prev_mouse_buttons & 1);
+    int right_click = (buttons & 2) && !(prev_mouse_buttons & 2);
     int release = !(buttons & 1) && (prev_mouse_buttons & 1);
     prev_mouse_buttons = buttons;
 
@@ -1020,6 +1021,22 @@ void compositor_handle_mouse(int mx, int my, int buttons)
                 compositor_draw_cursor(mx, my);
                 return;
             }
+        }
+    }
+
+    /* Right-click: forward to window under cursor */
+    if (right_click) {
+        window_t *w = window_at(mx, my);
+        if (w && my >= w->y + TITLEBAR_H && w->on_mouse) {
+            /* Focus the window */
+            for (int j = 0; j < MAX_WINDOWS; j++)
+                windows[j].focused = 0;
+            w->focused = 1;
+            int lx = mx - w->x - BORDER_W;
+            int ly = my - w->y - TITLEBAR_H - BORDER_W;
+            w->on_mouse(w, lx, ly, buttons);
+            compositor_draw_cursor(mx, my);
+            return;
         }
     }
 
