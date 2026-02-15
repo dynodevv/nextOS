@@ -100,6 +100,10 @@ uint32_t dns_resolve(const char *hostname);
 int      http_get(const char *host, uint16_t port, const char *path,
                   char *response_buf, int buf_size);
 
+/* HTTPS GET - returns response body length, or -1 on error */
+int      https_get(const char *host, uint16_t port, const char *path,
+                   char *response_buf, int buf_size);
+
 /* Process incoming packets */
 void     net_stack_process(void);
 

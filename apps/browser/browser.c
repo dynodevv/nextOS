@@ -1,10 +1,16 @@
 /*
  * nextOS - browser.c
- * Web browser with URL bar, navigation, and basic HTML renderer
+ * Web browser with URL bar, navigation, and HTML renderer
  *
  * Supports: <html>, <head>, <title>, <body>, <h1>-<h6>,
  *           <p>, <b>, <i>, <u>, <br>, <hr>, <a>, <ul>, <ol>, <li>,
- *           <pre>, <code>, bgcolor attribute on body
+ *           <pre>, <code>, <div>, <span>, <table>, <tr>, <td>, <th>,
+ *           <blockquote>, <center>, <font>, <input>, <button>, <form>,
+ *           <sup>, <sub>, <s>, <strike>, <small>, <big>, <dl>, <dt>, <dd>,
+ *           <img> (placeholder), <style>/<script> (skip content),
+ *           bgcolor/text/color attributes, HTTPS via TLS
+ *
+ * Features: Back/Forward/Refresh navigation, vertical scrollbar
  */
 #include "browser.h"
 #include "kernel/ui/compositor.h"
@@ -123,20 +129,6 @@ static void canvas_draw_char_bold(uint32_t *canvas, int cw, int ch,
     canvas_draw_char(canvas, cw, ch, x + 1, y, c, fg);
 }
 
-/* Underline: draw character with underline */
-static void canvas_draw_char_underline(uint32_t *canvas, int cw, int ch,
-                                       int x, int y, char c, uint32_t fg)
-{
-    canvas_draw_char(canvas, cw, ch, x, y, c, fg);
-    if (y + 15 >= 0 && y + 15 < ch) {
-        for (int col = 0; col < 8; col++) {
-            int px = x + col;
-            if (px >= 0 && px < cw)
-                canvas[(y + 15) * cw + px] = fg;
-        }
-    }
-}
-
 /* ── Browser State ───────────────────────────────────────────────────── */
 static window_t *browser_win = 0;
 
@@ -153,6 +145,7 @@ static int  page_len = 0;
 
 static char page_title[TITLE_MAX];
 static int  scroll_y = 0;
+static int  content_total_h = 0;  /* Total rendered content height */
 
 /* Navigation states */
 #define NAV_IDLE     0
@@ -162,23 +155,50 @@ static int  scroll_y = 0;
 static int nav_state = NAV_IDLE;
 static char status_msg[128];
 
+/* History stack for back/forward */
+#define HISTORY_MAX 32
+static char history_urls[HISTORY_MAX][URL_MAX];
+static int  history_count = 0;
+static int  history_pos = -1;  /* current position in history */
+
+static void history_push(const char *url)
+{
+    /* Truncate any forward history */
+    history_pos++;
+    if (history_pos >= HISTORY_MAX) {
+        /* Shift history down */
+        for (int i = 0; i < HISTORY_MAX - 1; i++)
+            str_cpy(history_urls[i], history_urls[i + 1]);
+        history_pos = HISTORY_MAX - 1;
+    }
+    str_cpy(history_urls[history_pos], url);
+    history_count = history_pos + 1;
+}
+
 /* ── URL Parsing ─────────────────────────────────────────────────────── */
 typedef struct {
     char host[128];
     char path[128];
     uint16_t port;
+    int is_https;
 } parsed_url_t;
 
 static int parse_url(const char *url, parsed_url_t *out)
 {
     mem_zero(out, sizeof(*out));
     out->port = 80;
+    out->is_https = 0;
     str_cpy(out->path, "/");
 
     const char *p = url;
-    /* Skip http:// */
-    if (str_ncasecmp(p, "http://", 7) == 0) p += 7;
-    else if (str_ncasecmp(p, "https://", 8) == 0) p += 8;
+    /* Skip http:// or https:// */
+    if (str_ncasecmp(p, "https://", 8) == 0) {
+        p += 8;
+        out->port = 443;
+        out->is_https = 1;
+    } else if (str_ncasecmp(p, "http://", 7) == 0) {
+        p += 7;
+    }
 
     /* Extract host */
     int hi = 0;
@@ -222,6 +242,7 @@ typedef struct {
     int bold;
     int italic;
     int underline;
+    int strikethrough;
     int preformatted;
     uint32_t text_color;
     uint32_t bg_color;
@@ -234,6 +255,17 @@ typedef struct {
     int in_title;
     int in_body;
     int in_head;
+    int in_style;          /* Inside <style> - skip content */
+    int in_script;         /* Inside <script> - skip content */
+    int centered;          /* <center> or align=center */
+    int in_table;
+    int in_table_row;
+    int table_col;         /* Current column in table row */
+    int table_col_x;       /* X position for current table column */
+
+    /* Font color stack (simplified: single level) */
+    uint32_t saved_color;
+    int color_saved;
 } render_state_t;
 
 static render_state_t rs;
@@ -281,7 +313,7 @@ static void render_newline(void)
 
 static void render_char(char c)
 {
-    if (rs.in_title || rs.in_head) return;
+    if (rs.in_title || rs.in_head || rs.in_style || rs.in_script) return;
 
     int draw_y = rs.y - rs.scroll;
 
@@ -293,19 +325,23 @@ static void render_char(char c)
 
     if (draw_y >= -16 && draw_y < rs.ch) {
         uint32_t fg = rs.in_link ? rs.link_color : rs.text_color;
-        if (rs.bold && rs.underline) {
+        if (rs.bold) {
             canvas_draw_char_bold(rs.canvas, rs.cw, rs.ch, rs.x, draw_y, c, fg);
-            /* underline */
-            if (draw_y + 15 >= 0 && draw_y + 15 < rs.ch)
-                for (int col = 0; col < 9; col++)
-                    if (rs.x + col >= 0 && rs.x + col < rs.cw)
-                        rs.canvas[(draw_y + 15) * rs.cw + rs.x + col] = fg;
-        } else if (rs.bold) {
-            canvas_draw_char_bold(rs.canvas, rs.cw, rs.ch, rs.x, draw_y, c, fg);
-        } else if (rs.underline) {
-            canvas_draw_char_underline(rs.canvas, rs.cw, rs.ch, rs.x, draw_y, c, fg);
         } else {
             canvas_draw_char(rs.canvas, rs.cw, rs.ch, rs.x, draw_y, c, fg);
+        }
+        if (rs.underline) {
+            if (draw_y + 15 >= 0 && draw_y + 15 < rs.ch)
+                for (int col = 0; col < (rs.bold ? 9 : 8); col++)
+                    if (rs.x + col >= 0 && rs.x + col < rs.cw)
+                        rs.canvas[(draw_y + 15) * rs.cw + rs.x + col] = fg;
+        }
+        if (rs.strikethrough) {
+            int sy = draw_y + 7;
+            if (sy >= 0 && sy < rs.ch)
+                for (int col = 0; col < (rs.bold ? 9 : 8); col++)
+                    if (rs.x + col >= 0 && rs.x + col < rs.cw)
+                        rs.canvas[sy * rs.cw + rs.x + col] = fg;
         }
     }
     rs.x += rs.bold ? 9 : 8;
@@ -374,10 +410,10 @@ static void handle_tag(const char *tag, int tag_len)
     }
     name[ni] = 0;
 
-    /* Handle tags */
-    if (str_cmp(name, "br") == 0) {
+    /* Self-closing tags */
+    if (str_cmp(name, "br") == 0 || str_cmp(name, "br/") == 0) {
         render_newline();
-    } else if (str_cmp(name, "hr") == 0) {
+    } else if (str_cmp(name, "hr") == 0 || str_cmp(name, "hr/") == 0) {
         render_newline();
         int draw_y = rs.y - rs.scroll + 8;
         if (draw_y >= 0 && draw_y < rs.ch)
@@ -385,15 +421,154 @@ static void handle_tag(const char *tag, int tag_len)
                        rs.max_x - rs.start_x, 0x808080);
         rs.y += 20;
         rs.x = rs.start_x;
+    } else if (str_cmp(name, "img") == 0) {
+        /* Image placeholder */
+        if (!is_close) {
+            char alt[64];
+            if (!get_attr(tag, tag_len, "alt", alt, sizeof(alt)))
+                str_cpy(alt, "[image]");
+            int draw_y = rs.y - rs.scroll;
+            if (draw_y >= -20 && draw_y < rs.ch) {
+                /* Draw a placeholder box */
+                int pw = str_len(alt) * 8 + 12;
+                int ph = 22;
+                int dx = rs.x;
+                if (dx + pw > rs.max_x) { render_newline(); draw_y = rs.y - rs.scroll; dx = rs.x; }
+                fill_rect(rs.canvas, rs.cw, rs.ch, dx, draw_y, pw, ph, 0xE8E8E8);
+                draw_hline(rs.canvas, rs.cw, rs.ch, dx, draw_y, pw, 0xC0C0C0);
+                draw_hline(rs.canvas, rs.cw, rs.ch, dx, draw_y + ph - 1, pw, 0xC0C0C0);
+                canvas_draw_string(rs.canvas, rs.cw, rs.ch, dx + 6, draw_y + 3, alt, 0x808080);
+                rs.x += pw + 4;
+            }
+        }
+    } else if (str_cmp(name, "input") == 0) {
+        /* Input field visual placeholder */
+        if (!is_close) {
+            char type[32], value[64], placeholder[64];
+            if (!get_attr(tag, tag_len, "type", type, sizeof(type)))
+                str_cpy(type, "text");
+            if (!get_attr(tag, tag_len, "value", value, sizeof(value)))
+                value[0] = 0;
+            if (!get_attr(tag, tag_len, "placeholder", placeholder, sizeof(placeholder)))
+                placeholder[0] = 0;
+            int draw_y = rs.y - rs.scroll;
+            if (draw_y >= -20 && draw_y < rs.ch) {
+                if (str_ncasecmp(type, "submit", 6) == 0 || str_ncasecmp(type, "button", 6) == 0) {
+                    /* Button-style input */
+                    const char *label = value[0] ? value : "Submit";
+                    int bw = str_len(label) * 8 + 16;
+                    fill_rect(rs.canvas, rs.cw, rs.ch, rs.x, draw_y, bw, 22, 0xE0E0E0);
+                    draw_hline(rs.canvas, rs.cw, rs.ch, rs.x, draw_y, bw, 0xA0A0A0);
+                    draw_hline(rs.canvas, rs.cw, rs.ch, rs.x, draw_y + 21, bw, 0xA0A0A0);
+                    canvas_draw_string(rs.canvas, rs.cw, rs.ch, rs.x + 8, draw_y + 3, label, 0x1A1A1A);
+                    rs.x += bw + 4;
+                } else if (str_ncasecmp(type, "checkbox", 8) == 0) {
+                    fill_rect(rs.canvas, rs.cw, rs.ch, rs.x, draw_y + 2, 14, 14, 0xFFFFFF);
+                    draw_hline(rs.canvas, rs.cw, rs.ch, rs.x, draw_y + 2, 14, 0x808080);
+                    draw_hline(rs.canvas, rs.cw, rs.ch, rs.x, draw_y + 15, 14, 0x808080);
+                    rs.x += 18;
+                } else if (str_ncasecmp(type, "radio", 5) == 0) {
+                    /* Radio button as a circle */
+                    int rcx = rs.x + 7, rcy = draw_y + 9;
+                    for (int dy2 = -6; dy2 <= 6; dy2++)
+                        for (int dx2 = -6; dx2 <= 6; dx2++)
+                            if (dx2*dx2 + dy2*dy2 <= 36 && dx2*dx2 + dy2*dy2 >= 25)
+                                if (rcy+dy2 >= 0 && rcy+dy2 < rs.ch && rcx+dx2 >= 0 && rcx+dx2 < rs.cw)
+                                    rs.canvas[(rcy+dy2)*rs.cw + rcx+dx2] = 0x808080;
+                    for (int dy2 = -5; dy2 <= 5; dy2++)
+                        for (int dx2 = -5; dx2 <= 5; dx2++)
+                            if (dx2*dx2 + dy2*dy2 <= 25)
+                                if (rcy+dy2 >= 0 && rcy+dy2 < rs.ch && rcx+dx2 >= 0 && rcx+dx2 < rs.cw)
+                                    rs.canvas[(rcy+dy2)*rs.cw + rcx+dx2] = 0xFFFFFF;
+                    rs.x += 18;
+                } else {
+                    /* Text input field */
+                    int fw = 150;
+                    fill_rect(rs.canvas, rs.cw, rs.ch, rs.x, draw_y, fw, 22, 0xFFFFFF);
+                    draw_hline(rs.canvas, rs.cw, rs.ch, rs.x, draw_y, fw, 0x808080);
+                    draw_hline(rs.canvas, rs.cw, rs.ch, rs.x, draw_y + 21, fw, 0x808080);
+                    /* Left/right borders */
+                    for (int by = draw_y; by < draw_y + 22 && by < rs.ch; by++) {
+                        if (by >= 0) {
+                            if (rs.x >= 0 && rs.x < rs.cw) rs.canvas[by * rs.cw + rs.x] = 0x808080;
+                            if (rs.x+fw-1 >= 0 && rs.x+fw-1 < rs.cw) rs.canvas[by * rs.cw + rs.x+fw-1] = 0x808080;
+                        }
+                    }
+                    const char *txt = value[0] ? value : placeholder;
+                    if (txt[0])
+                        canvas_draw_string(rs.canvas, rs.cw, rs.ch, rs.x + 4, draw_y + 3,
+                                           txt, value[0] ? 0x1A1A1A : 0xA0A0A0);
+                    rs.x += fw + 4;
+                }
+            }
+        }
+    } else if (str_cmp(name, "button") == 0) {
+        if (!is_close) {
+            /* Will render content as button label */
+            int draw_y = rs.y - rs.scroll;
+            if (draw_y >= -20 && draw_y < rs.ch) {
+                fill_rect(rs.canvas, rs.cw, rs.ch, rs.x, draw_y, 4, 22, 0xE0E0E0);
+            }
+            rs.x += 8;
+        } else {
+            rs.x += 8;
+        }
+    /* Block-level tags */
     } else if (str_cmp(name, "p") == 0) {
         if (is_close) { rs.y += 8; rs.x = rs.start_x; }
         else { render_newline(); rs.y += 4; }
+    } else if (str_cmp(name, "div") == 0) {
+        if (!is_close) { render_newline(); }
+        else { render_newline(); }
+    } else if (str_cmp(name, "span") == 0) {
+        /* Inline element - check for style color */
+        if (!is_close) {
+            char style[64];
+            if (get_attr(tag, tag_len, "style", style, sizeof(style))) {
+                /* Look for color: in style */
+                for (int si = 0; style[si]; si++) {
+                    if (str_ncasecmp(style + si, "color:", 6) == 0) {
+                        int ci = si + 6;
+                        while (style[ci] == ' ') ci++;
+                        char cv[16];
+                        int cvi = 0;
+                        while (style[ci] && style[ci] != ';' && style[ci] != '"' && cvi < 15)
+                            cv[cvi++] = style[ci++];
+                        cv[cvi] = 0;
+                        rs.saved_color = rs.text_color;
+                        rs.color_saved = 1;
+                        rs.text_color = named_color(cv);
+                        break;
+                    }
+                }
+            }
+        } else {
+            if (rs.color_saved) { rs.text_color = rs.saved_color; rs.color_saved = 0; }
+        }
+    } else if (str_cmp(name, "blockquote") == 0) {
+        if (is_close) { rs.start_x -= 30; rs.max_x += 10; render_newline(); rs.y += 4; }
+        else { rs.start_x += 30; rs.max_x -= 10; render_newline(); rs.y += 4; }
+    } else if (str_cmp(name, "center") == 0) {
+        rs.centered = !is_close;
+        if (!is_close) render_newline();
+    /* Inline formatting tags */
     } else if (str_cmp(name, "b") == 0 || str_cmp(name, "strong") == 0) {
         rs.bold = !is_close;
     } else if (str_cmp(name, "i") == 0 || str_cmp(name, "em") == 0) {
         rs.italic = !is_close;
-    } else if (str_cmp(name, "u") == 0) {
+    } else if (str_cmp(name, "u") == 0 || str_cmp(name, "ins") == 0) {
         rs.underline = !is_close;
+    } else if (str_cmp(name, "s") == 0 || str_cmp(name, "strike") == 0 || str_cmp(name, "del") == 0) {
+        rs.strikethrough = !is_close;
+    } else if (str_cmp(name, "small") == 0) {
+        /* Small text: we can't really change font size, just note it */
+        (void)is_close;
+    } else if (str_cmp(name, "big") == 0) {
+        (void)is_close;
+    } else if (str_cmp(name, "sup") == 0) {
+        (void)is_close;  /* Superscript: difficult with bitmap font */
+    } else if (str_cmp(name, "sub") == 0) {
+        (void)is_close;
     } else if (str_cmp(name, "a") == 0) {
         if (is_close) {
             rs.in_link = 0;
@@ -402,6 +577,17 @@ static void handle_tag(const char *tag, int tag_len)
             rs.in_link = 1;
             rs.underline = 1;
         }
+    } else if (str_cmp(name, "font") == 0) {
+        if (is_close) {
+            if (rs.color_saved) { rs.text_color = rs.saved_color; rs.color_saved = 0; }
+        } else {
+            char color_val[32];
+            if (get_attr(tag, tag_len, "color", color_val, sizeof(color_val))) {
+                rs.saved_color = rs.text_color;
+                rs.color_saved = 1;
+                rs.text_color = named_color(color_val);
+            }
+        }
     } else if (str_cmp(name, "pre") == 0 || str_cmp(name, "code") == 0) {
         rs.preformatted = !is_close;
         if (!is_close) { render_newline(); }
@@ -409,6 +595,10 @@ static void handle_tag(const char *tag, int tag_len)
         rs.in_title = !is_close;
     } else if (str_cmp(name, "head") == 0) {
         rs.in_head = !is_close;
+    } else if (str_cmp(name, "style") == 0) {
+        rs.in_style = !is_close;
+    } else if (str_cmp(name, "script") == 0) {
+        rs.in_script = !is_close;
     } else if (str_cmp(name, "body") == 0) {
         if (!is_close) {
             rs.in_body = 1;
@@ -424,6 +614,7 @@ static void handle_tag(const char *tag, int tag_len)
                 rs.text_color = named_color(text_val);
             }
         }
+    /* Heading tags */
     } else if (name[0] == 'h' && name[1] >= '1' && name[1] <= '6' && name[2] == 0) {
         int level = name[1] - '0';
         if (is_close) {
@@ -441,12 +632,13 @@ static void handle_tag(const char *tag, int tag_len)
             int sizes[] = {0, 32, 28, 24, 20, 18, 18};
             rs.line_height = sizes[level];
         }
+    /* List tags */
     } else if (str_cmp(name, "ul") == 0) {
-        if (is_close) { rs.in_list = 0; rs.start_x -= 20; }
-        else { rs.in_list = 1; rs.list_ordered = 0; rs.list_item = 0; rs.start_x += 20; }
+        if (is_close) { rs.in_list = 0; rs.start_x -= 20; render_newline(); }
+        else { rs.in_list = 1; rs.list_ordered = 0; rs.list_item = 0; rs.start_x += 20; render_newline(); }
     } else if (str_cmp(name, "ol") == 0) {
-        if (is_close) { rs.in_list = 0; rs.start_x -= 20; }
-        else { rs.in_list = 1; rs.list_ordered = 1; rs.list_item = 0; rs.start_x += 20; }
+        if (is_close) { rs.in_list = 0; rs.start_x -= 20; render_newline(); }
+        else { rs.in_list = 1; rs.list_ordered = 1; rs.list_item = 0; rs.start_x += 20; render_newline(); }
     } else if (str_cmp(name, "li") == 0 && !is_close) {
         render_newline();
         rs.list_item++;
@@ -463,7 +655,95 @@ static void handle_tag(const char *tag, int tag_len)
         } else {
             render_text("* ", 2);
         }
+    /* Definition list */
+    } else if (str_cmp(name, "dl") == 0) {
+        if (!is_close) render_newline();
+        else render_newline();
+    } else if (str_cmp(name, "dt") == 0) {
+        if (!is_close) { render_newline(); rs.bold = 1; }
+        else { rs.bold = 0; }
+    } else if (str_cmp(name, "dd") == 0) {
+        if (!is_close) { render_newline(); rs.start_x += 20; rs.x = rs.start_x; }
+        else { rs.start_x -= 20; }
+    /* Table tags */
+    } else if (str_cmp(name, "table") == 0) {
+        if (!is_close) {
+            rs.in_table = 1;
+            render_newline();
+            rs.y += 4;
+        } else {
+            rs.in_table = 0;
+            render_newline();
+            rs.y += 4;
+        }
+    } else if (str_cmp(name, "tr") == 0) {
+        if (!is_close) {
+            rs.in_table_row = 1;
+            rs.table_col = 0;
+            rs.table_col_x = rs.start_x;
+            render_newline();
+        } else {
+            rs.in_table_row = 0;
+        }
+    } else if (str_cmp(name, "td") == 0 || str_cmp(name, "th") == 0) {
+        if (!is_close) {
+            /* Move to next column position */
+            int col_w = (rs.max_x - rs.start_x) / 4;  /* Simple: 4 equal columns */
+            if (col_w < 60) col_w = 60;
+            rs.x = rs.table_col_x;
+            if (name[1] == 'h') rs.bold = 1;  /* <th> = bold */
+            rs.table_col++;
+            /* Draw a subtle cell border */
+            int draw_y = rs.y - rs.scroll;
+            if (draw_y >= 0 && draw_y < rs.ch)
+                draw_hline(rs.canvas, rs.cw, rs.ch, rs.x, draw_y - 1,
+                           col_w, 0xD0D0D0);
+        } else {
+            if (name[1] == 'h') rs.bold = 0;
+            int col_w = (rs.max_x - rs.start_x) / 4;
+            if (col_w < 60) col_w = 60;
+            rs.table_col_x += col_w;
+        }
+    /* Form tags (visual only) */
+    } else if (str_cmp(name, "form") == 0) {
+        if (!is_close) render_newline();
+    } else if (str_cmp(name, "textarea") == 0) {
+        if (!is_close) {
+            int draw_y = rs.y - rs.scroll;
+            if (draw_y >= -60 && draw_y < rs.ch) {
+                int tw = 200, th = 60;
+                fill_rect(rs.canvas, rs.cw, rs.ch, rs.x, draw_y, tw, th, 0xFFFFFF);
+                draw_hline(rs.canvas, rs.cw, rs.ch, rs.x, draw_y, tw, 0x808080);
+                draw_hline(rs.canvas, rs.cw, rs.ch, rs.x, draw_y + th - 1, tw, 0x808080);
+                for (int by = draw_y; by < draw_y + th && by < rs.ch; by++) {
+                    if (by >= 0) {
+                        if (rs.x >= 0 && rs.x < rs.cw) rs.canvas[by * rs.cw + rs.x] = 0x808080;
+                        if (rs.x+tw-1 >= 0 && rs.x+tw-1 < rs.cw) rs.canvas[by * rs.cw + rs.x+tw-1] = 0x808080;
+                    }
+                }
+            }
+            rs.y += 64;
+            rs.x = rs.start_x;
+        }
+    } else if (str_cmp(name, "select") == 0) {
+        if (!is_close) {
+            int draw_y = rs.y - rs.scroll;
+            if (draw_y >= -20 && draw_y < rs.ch) {
+                int sw = 120;
+                fill_rect(rs.canvas, rs.cw, rs.ch, rs.x, draw_y, sw, 22, 0xFFFFFF);
+                draw_hline(rs.canvas, rs.cw, rs.ch, rs.x, draw_y, sw, 0x808080);
+                draw_hline(rs.canvas, rs.cw, rs.ch, rs.x, draw_y + 21, sw, 0x808080);
+                /* Dropdown arrow */
+                canvas_draw_char(rs.canvas, rs.cw, rs.ch, rs.x + sw - 14, draw_y + 3, 'v', 0x606060);
+                rs.x += sw + 4;
+            }
+        }
+    } else if (str_cmp(name, "option") == 0) {
+        /* Skip option content visually */
+    } else if (str_cmp(name, "label") == 0) {
+        /* Label: just render content normally */
     }
+    /* Other tags we silently ignore: meta, link, noscript, etc. */
 }
 
 /* Decode HTML entities */
@@ -489,12 +769,13 @@ static void render_html(const char *html, int html_len,
     rs.x = 8;
     rs.y = 4;
     rs.start_x = 8;
-    rs.max_x = cw - 8;
+    rs.max_x = cw - 22;  /* Leave space for scrollbar */
     rs.line_height = 18;
     rs.scroll = scroll;
     rs.bold = 0;
     rs.italic = 0;
     rs.underline = 0;
+    rs.strikethrough = 0;
     rs.preformatted = 0;
     rs.text_color = 0x1A1A1A;
     rs.bg_color = 0xFFFFFF;
@@ -507,6 +788,15 @@ static void render_html(const char *html, int html_len,
     rs.in_title = 0;
     rs.in_body = 0;
     rs.in_head = 0;
+    rs.in_style = 0;
+    rs.in_script = 0;
+    rs.centered = 0;
+    rs.in_table = 0;
+    rs.in_table_row = 0;
+    rs.table_col = 0;
+    rs.table_col_x = 8;
+    rs.saved_color = 0x1A1A1A;
+    rs.color_saved = 0;
 
     /* Clear canvas */
     fill_rect(canvas, cw, ch, 0, 0, cw, ch, rs.bg_color);
@@ -514,6 +804,20 @@ static void render_html(const char *html, int html_len,
     int i = 0;
     while (i < html_len) {
         if (html[i] == '<') {
+            /* Check for comments <!-- --> */
+            if (i + 3 < html_len && html[i+1] == '!' && html[i+2] == '-' && html[i+3] == '-') {
+                /* Skip to end of comment */
+                int ci = i + 4;
+                while (ci + 2 < html_len) {
+                    if (html[ci] == '-' && html[ci+1] == '-' && html[ci+2] == '>') {
+                        ci += 3;
+                        break;
+                    }
+                    ci++;
+                }
+                i = ci;
+                continue;
+            }
             /* Find end of tag */
             int tag_start = i + 1;
             int tag_end = tag_start;
@@ -535,9 +839,7 @@ static void render_html(const char *html, int html_len,
         } else if (html[i] == '&') {
             int advance;
             char c = decode_entity(html + i, &advance);
-            if (rs.in_title) {
-                /* Accumulate title */
-            } else {
+            if (!rs.in_title && !rs.in_style && !rs.in_script) {
                 render_char(c);
             }
             i += advance;
@@ -549,7 +851,7 @@ static void render_html(const char *html, int html_len,
                     page_title[ti] = html[i];
                     page_title[ti + 1] = 0;
                 }
-            } else {
+            } else if (!rs.in_style && !rs.in_script) {
                 char c = html[i];
                 if (c == '\n' || c == '\r') {
                     if (rs.preformatted) render_newline();
@@ -564,6 +866,9 @@ static void render_html(const char *html, int html_len,
             i++;
         }
     }
+
+    /* Record total content height for scrollbar */
+    content_total_h = rs.y + rs.line_height;
 }
 
 /* ── Default Homepage ────────────────────────────────────────────────── */
@@ -576,15 +881,22 @@ static const char homepage[] =
     "<p>Type a URL in the address bar above and press Enter to navigate.</p>"
     "<h2>Features</h2>"
     "<ul>"
-    "<li><b>HTML Rendering</b> - Basic HTML support with headings, lists, and formatting</li>"
-    "<li><b>HTTP/1.1</b> - Fetch web pages over the network</li>"
+    "<li><b>HTML Rendering</b> - Rich HTML support with headings, lists, tables, forms, and formatting</li>"
+    "<li><b>HTTP/1.1 &amp; HTTPS</b> - Fetch web pages over HTTP and HTTPS</li>"
     "<li><b>DNS Resolution</b> - Resolve hostnames to IP addresses</li>"
+    "<li><b>Navigation</b> - Back, Forward, and Refresh buttons</li>"
+    "<li><b>Scrollbar</b> - Visual scrollbar for page navigation</li>"
     "</ul>"
+    "<h2>Supported HTML Tags</h2>"
+    "<p><b>Block:</b> div, p, h1-h6, pre, blockquote, center, table, tr, td, th, ul, ol, li, dl, dt, dd, hr, br</p>"
+    "<p><b>Inline:</b> b, strong, i, em, u, s, strike, a, font, span, code, small, big, sup, sub</p>"
+    "<p><b>Forms:</b> input (text, submit, checkbox, radio), button, textarea, select</p>"
     "<h2>Tips</h2>"
     "<ol>"
     "<li>Enter a URL like <u>http://example.com</u> in the address bar</li>"
-    "<li>Use the scroll wheel or arrow keys to scroll the page</li>"
-    "<li>The browser supports basic HTML tags for viewing simple web pages</li>"
+    "<li>Use the scroll wheel, arrow keys, or scrollbar to scroll the page</li>"
+    "<li>Use Back/Forward buttons to navigate history</li>"
+    "<li>HTTPS URLs are supported for secure sites</li>"
     "</ol>"
     "<hr>"
     "<p><i>nextOS 2.5.0 - A next-generation operating system</i></p>"
@@ -603,13 +915,21 @@ static void load_homepage(void)
 }
 
 /* ── Navigation ──────────────────────────────────────────────────────── */
+static void navigate_internal(const char *url, int push_history);
+
 static void navigate(const char *url)
+{
+    navigate_internal(url, 1);
+}
+
+static void navigate_internal(const char *url, int push_history)
 {
     if (!url || !url[0]) return;
 
     /* Handle about: URLs */
     if (str_ncmp(url, "about:", 6) == 0) {
         load_homepage();
+        if (push_history) history_push(url);
         return;
     }
 
@@ -649,34 +969,84 @@ static void navigate(const char *url)
     str_cat(status_msg, purl.host);
     str_cat(status_msg, "...");
 
-    /* Perform HTTP GET */
-    int result = http_get(purl.host, purl.port, purl.path, page_buf, PAGE_BUF_SIZE);
-
-    if (result < 0) {
-        str_cpy(page_buf,
-            "<html><body bgcolor=\"#FFF0F0\">"
-            "<h1>Connection Failed</h1>"
-            "<p>Could not connect to the server.</p>"
-            "<p>Please check the URL and try again.</p>"
-            "</body></html>");
-        page_len = str_len(page_buf);
-        str_cpy(page_title, "Connection Error");
-        scroll_y = 0;
-        nav_state = NAV_ERROR;
-        str_cpy(status_msg, "Connection failed");
-        return;
+    if (purl.is_https) {
+        str_cpy(status_msg, "Connecting (HTTPS)...");
+        /* Use HTTPS GET via TLS */
+        int result = https_get(purl.host, purl.port, purl.path, page_buf, PAGE_BUF_SIZE);
+        if (result < 0) {
+            str_cpy(page_buf,
+                "<html><body bgcolor=\"#FFF0F0\">"
+                "<h1>HTTPS Connection Failed</h1>"
+                "<p>Could not establish a secure connection to the server.</p>"
+                "<p>The server may not support the TLS version used by nextOS.</p>"
+                "<p>Try using <b>http://</b> instead if available.</p>"
+                "</body></html>");
+            page_len = str_len(page_buf);
+            str_cpy(page_title, "HTTPS Error");
+            scroll_y = 0;
+            nav_state = NAV_ERROR;
+            str_cpy(status_msg, "HTTPS connection failed");
+            return;
+        }
+        page_len = result;
+    } else {
+        /* Perform HTTP GET */
+        int result = http_get(purl.host, purl.port, purl.path, page_buf, PAGE_BUF_SIZE);
+        if (result < 0) {
+            str_cpy(page_buf,
+                "<html><body bgcolor=\"#FFF0F0\">"
+                "<h1>Connection Failed</h1>"
+                "<p>Could not connect to the server.</p>"
+                "<p>Please check the URL and try again.</p>"
+                "</body></html>");
+            page_len = str_len(page_buf);
+            str_cpy(page_title, "Connection Error");
+            scroll_y = 0;
+            nav_state = NAV_ERROR;
+            str_cpy(status_msg, "Connection failed");
+            return;
+        }
+        page_len = result;
     }
 
-    page_len = result;
     page_title[0] = 0;  /* Will be set by renderer */
     scroll_y = 0;
     nav_state = NAV_DONE;
     str_cpy(status_msg, "Done");
+
+    if (push_history) history_push(url);
+}
+
+static void go_back(void)
+{
+    if (history_pos > 0) {
+        history_pos--;
+        str_cpy(url_bar, history_urls[history_pos]);
+        url_cursor = str_len(url_bar);
+        navigate_internal(url_bar, 0);
+    }
+}
+
+static void go_forward(void)
+{
+    if (history_pos < history_count - 1) {
+        history_pos++;
+        str_cpy(url_bar, history_urls[history_pos]);
+        url_cursor = str_len(url_bar);
+        navigate_internal(url_bar, 0);
+    }
+}
+
+static void refresh_page(void)
+{
+    navigate_internal(url_bar, 0);
 }
 
 /* ── Paint ───────────────────────────────────────────────────────────── */
 #define TOOLBAR_H  32
 #define STATUS_H   20
+#define SCROLLBAR_W 14
+#define NAV_BTN_W  28
 
 static void browser_paint(window_t *win)
 {
@@ -687,7 +1057,7 @@ static void browser_paint(window_t *win)
     /* Background */
     fill_rect(win->canvas, cw, ch, 0, 0, cw, ch, 0xE8E8E8);
 
-    /* ── Toolbar (URL bar area) ─────────────────────────────────────── */
+    /* ── Toolbar (navigation + URL bar area) ───────────────────────── */
     /* Toolbar background with gradient */
     for (int y = 0; y < TOOLBAR_H; y++) {
         uint32_t c = 0xDCDCDC + ((y * 0x10 / TOOLBAR_H) << 16) +
@@ -697,24 +1067,61 @@ static void browser_paint(window_t *win)
     /* Bottom border */
     draw_hline(win->canvas, cw, ch, 0, TOOLBAR_H - 1, cw, 0xA0A0A0);
 
+    /* Navigation buttons: Back, Forward, Refresh */
+    int btn_y = 4, btn_h = 24;
+    int bx = 4;
+
+    /* Back button */
+    {
+        uint32_t bc = (history_pos > 0) ? 0x4488CC : 0xA0A0A0;
+        fill_rect(win->canvas, cw, ch, bx, btn_y, NAV_BTN_W, btn_h, bc);
+        /* Left arrow < */
+        canvas_draw_char(win->canvas, cw, ch, bx + 10, btn_y + 4, '<', 0xFFFFFF);
+    }
+    bx += NAV_BTN_W + 2;
+
+    /* Forward button */
+    {
+        uint32_t bc = (history_pos < history_count - 1) ? 0x4488CC : 0xA0A0A0;
+        fill_rect(win->canvas, cw, ch, bx, btn_y, NAV_BTN_W, btn_h, bc);
+        /* Right arrow > */
+        canvas_draw_char(win->canvas, cw, ch, bx + 10, btn_y + 4, '>', 0xFFFFFF);
+    }
+    bx += NAV_BTN_W + 2;
+
+    /* Refresh button */
+    {
+        fill_rect(win->canvas, cw, ch, bx, btn_y, NAV_BTN_W, btn_h, 0x4488CC);
+        /* Circular arrow (simplified as 'R') */
+        canvas_draw_char(win->canvas, cw, ch, bx + 10, btn_y + 4, 'R', 0xFFFFFF);
+    }
+    bx += NAV_BTN_W + 4;
+
     /* Go button */
-    int go_w = 40;
-    int go_x = cw - go_w - 6;
-    fill_rect(win->canvas, cw, ch, go_x, 4, go_w, 24, 0x4488CC);
-    canvas_draw_string(win->canvas, cw, ch, go_x + 10, 8, "Go", 0xFFFFFF);
+    int go_w = 32;
+    int go_x = cw - go_w - 4;
+    fill_rect(win->canvas, cw, ch, go_x, btn_y, go_w, btn_h, 0x4488CC);
+    canvas_draw_string(win->canvas, cw, ch, go_x + 8, btn_y + 4, "Go", 0xFFFFFF);
 
     /* URL input field */
-    int url_x = 8;
-    int url_w = go_x - 14;
-    fill_rect(win->canvas, cw, ch, url_x, 4, url_w, 24, 0xFFFFFF);
+    int url_x = bx;
+    int url_w = go_x - bx - 4;
+    fill_rect(win->canvas, cw, ch, url_x, btn_y, url_w, btn_h, 0xFFFFFF);
     /* Border */
-    draw_hline(win->canvas, cw, ch, url_x, 4, url_w, 0x808080);
-    draw_hline(win->canvas, cw, ch, url_x, 27, url_w, 0x808080);
-    for (int y = 4; y < 28; y++) {
+    draw_hline(win->canvas, cw, ch, url_x, btn_y, url_w, 0x808080);
+    draw_hline(win->canvas, cw, ch, url_x, btn_y + btn_h - 1, url_w, 0x808080);
+    for (int y = btn_y; y < btn_y + btn_h; y++) {
         if (url_x >= 0 && url_x < cw)
             win->canvas[y * cw + url_x] = 0x808080;
         if (url_x + url_w - 1 >= 0 && url_x + url_w - 1 < cw)
             win->canvas[y * cw + url_x + url_w - 1] = 0x808080;
+    }
+
+    /* HTTPS lock indicator */
+    if (str_ncasecmp(url_bar, "https://", 8) == 0) {
+        canvas_draw_char(win->canvas, cw, ch, url_x + 4, btn_y + 4, '*', 0x40A040);
+        url_x += 10;
+        url_w -= 10;
     }
 
     /* URL text */
@@ -722,9 +1129,9 @@ static void browser_paint(window_t *win)
     int start = 0;
     if (url_cursor > max_chars - 2)
         start = url_cursor - max_chars + 2;
-    for (int i = start; url_bar[i] && (i - start) < max_chars; i++) {
+    for (int i2 = start; url_bar[i2] && (i2 - start) < max_chars; i2++) {
         canvas_draw_char(win->canvas, cw, ch,
-                         url_x + 4 + (i - start) * 8, 8, url_bar[i], 0x1A1A1A);
+                         url_x + 4 + (i2 - start) * 8, btn_y + 4, url_bar[i2], 0x1A1A1A);
     }
 
     /* Cursor blink */
@@ -733,25 +1140,70 @@ static void browser_paint(window_t *win)
         if ((t / 500) & 1) {
             int cx = url_x + 4 + (url_cursor - start) * 8;
             if (cx >= url_x && cx < url_x + url_w)
-                fill_rect(win->canvas, cw, ch, cx, 8, 2, 16, 0x1A1A1A);
+                fill_rect(win->canvas, cw, ch, cx, btn_y + 4, 2, 16, 0x1A1A1A);
         }
     }
 
     /* ── Page Content Area ──────────────────────────────────────────── */
     int content_y = TOOLBAR_H;
     int content_h = ch - TOOLBAR_H - STATUS_H;
+    int content_w = cw - SCROLLBAR_W;
 
     if (page_len > 0) {
         /* Render HTML into a sub-canvas area */
         uint32_t *content_canvas = win->canvas + content_y * cw;
         /* Clear content area */
-        fill_rect(win->canvas, cw, ch, 0, content_y, cw, content_h, 0xFFFFFF);
+        fill_rect(win->canvas, cw, ch, 0, content_y, content_w, content_h, 0xFFFFFF);
         render_html(page_buf, page_len, content_canvas, cw, content_h, scroll_y);
     } else {
-        fill_rect(win->canvas, cw, ch, 0, content_y, cw, content_h, 0xFFFFFF);
+        fill_rect(win->canvas, cw, ch, 0, content_y, content_w, content_h, 0xFFFFFF);
         if (nav_state == NAV_LOADING) {
-            canvas_draw_string(win->canvas, cw, ch, cw / 2 - 40,
+            canvas_draw_string(win->canvas, cw, ch, content_w / 2 - 40,
                                content_y + content_h / 2, "Loading...", 0x808080);
+        }
+    }
+
+    /* ── Scrollbar ──────────────────────────────────────────────────── */
+    {
+        int sb_x = cw - SCROLLBAR_W;
+        /* Scrollbar track */
+        fill_rect(win->canvas, cw, ch, sb_x, content_y, SCROLLBAR_W, content_h, 0xE0E0E0);
+        /* Track border */
+        for (int sy = content_y; sy < content_y + content_h && sy < ch; sy++) {
+            if (sb_x >= 0 && sb_x < cw) win->canvas[sy * cw + sb_x] = 0xC0C0C0;
+        }
+
+        /* Scrollbar thumb */
+        int total_h = content_total_h > content_h ? content_total_h : content_h;
+        int thumb_h = content_h * content_h / total_h;
+        if (thumb_h < 20) thumb_h = 20;
+        if (thumb_h > content_h) thumb_h = content_h;
+        int max_scroll = total_h - content_h;
+        if (max_scroll < 1) max_scroll = 1;
+        int thumb_y = content_y + (scroll_y * (content_h - thumb_h)) / max_scroll;
+        if (thumb_y < content_y) thumb_y = content_y;
+        if (thumb_y + thumb_h > content_y + content_h)
+            thumb_y = content_y + content_h - thumb_h;
+
+        /* Thumb body with gradient */
+        for (int ty = thumb_y; ty < thumb_y + thumb_h && ty < ch; ty++) {
+            int rel = ty - thumb_y;
+            uint32_t tc2 = 0xA0A0A0 + ((rel * 0x20 / thumb_h) << 16) +
+                          ((rel * 0x20 / thumb_h) << 8) + (rel * 0x20 / thumb_h);
+            for (int tx = sb_x + 2; tx < sb_x + SCROLLBAR_W - 1 && tx < cw; tx++) {
+                if (ty >= 0) win->canvas[ty * cw + tx] = tc2;
+            }
+        }
+        /* Thumb border */
+        draw_hline(win->canvas, cw, ch, sb_x + 2, thumb_y, SCROLLBAR_W - 3, 0x808080);
+        draw_hline(win->canvas, cw, ch, sb_x + 2, thumb_y + thumb_h - 1, SCROLLBAR_W - 3, 0x808080);
+        /* Grip lines on thumb */
+        int grip_y = thumb_y + thumb_h / 2;
+        for (int gi = -2; gi <= 2; gi += 2) {
+            int gy = grip_y + gi;
+            if (gy >= content_y && gy < content_y + content_h && gy < ch && gy >= 0)
+                for (int gx = sb_x + 4; gx < sb_x + SCROLLBAR_W - 3 && gx < cw; gx++)
+                    win->canvas[gy * cw + gx] = 0x808080;
         }
     }
 
@@ -764,23 +1216,83 @@ static void browser_paint(window_t *win)
     /* Network status indicator */
     uint32_t ind_color = net_is_available() ? 0x40A040 : 0xA04040;
     fill_rect(win->canvas, cw, ch, cw - 14, sb_y + 5, 8, 8, ind_color);
+
+    /* HTTPS indicator */
+    if (str_ncasecmp(url_bar, "https://", 8) == 0) {
+        canvas_draw_string(win->canvas, cw, ch, cw - 60, sb_y + 3, "HTTPS", 0x40A040);
+    }
 }
 
 /* ── Mouse ───────────────────────────────────────────────────────────── */
 static int prev_buttons = 0;
+static int scrollbar_dragging = 0;
+static int scrollbar_drag_offset = 0;
 
 static void browser_mouse(window_t *win, int mx, int my, int buttons)
 {
     if (!win) return;
     int cw = win->width - 4;
+    int ch = win->height - 4;
     int click = (buttons & 1) && !(prev_buttons & 1);
+    int release = !(buttons & 1) && (prev_buttons & 1);
     prev_buttons = buttons;
 
+    int content_y = TOOLBAR_H;
+    int content_h = ch - TOOLBAR_H - STATUS_H;
+
+    /* Scrollbar dragging */
+    if (scrollbar_dragging) {
+        if (buttons & 1) {
+            int total_h = content_total_h > content_h ? content_total_h : content_h;
+            int thumb_h = content_h * content_h / total_h;
+            if (thumb_h < 20) thumb_h = 20;
+            if (thumb_h > content_h) thumb_h = content_h;
+            int max_scroll = total_h - content_h;
+            if (max_scroll < 1) max_scroll = 1;
+            int track_range = content_h - thumb_h;
+            if (track_range < 1) track_range = 1;
+            int thumb_y_new = my - scrollbar_drag_offset - content_y;
+            scroll_y = thumb_y_new * max_scroll / track_range;
+            if (scroll_y < 0) scroll_y = 0;
+            if (scroll_y > max_scroll) scroll_y = max_scroll;
+        } else {
+            scrollbar_dragging = 0;
+        }
+        return;
+    }
+
     if (click) {
+        int btn_y = 4, btn_h = 24;
+
+        /* Back button */
+        int bx = 4;
+        if (my >= btn_y && my < btn_y + btn_h && mx >= bx && mx < bx + NAV_BTN_W) {
+            go_back();
+            return;
+        }
+        bx += NAV_BTN_W + 2;
+
+        /* Forward button */
+        if (my >= btn_y && my < btn_y + btn_h && mx >= bx && mx < bx + NAV_BTN_W) {
+            go_forward();
+            return;
+        }
+        bx += NAV_BTN_W + 2;
+
+        /* Refresh button */
+        if (my >= btn_y && my < btn_y + btn_h && mx >= bx && mx < bx + NAV_BTN_W) {
+            refresh_page();
+            return;
+        }
+        bx += NAV_BTN_W + 4;
+
         /* URL bar click */
-        if (my >= 4 && my < 28 && mx >= 8 && mx < cw - 52) {
+        int go_x = cw - 36;
+        int url_x = bx;
+        int url_w = go_x - bx - 4;
+        if (my >= btn_y && my < btn_y + btn_h && mx >= url_x && mx < url_x + url_w) {
             url_focused = 1;
-            int rel_x = mx - 12;
+            int rel_x = mx - url_x - 4;
             url_cursor = rel_x / 8;
             int len = str_len(url_bar);
             if (url_cursor > len) url_cursor = len;
@@ -789,9 +1301,37 @@ static void browser_mouse(window_t *win, int mx, int my, int buttons)
         }
 
         /* Go button click */
-        if (my >= 4 && my < 28 && mx >= cw - 46 && mx < cw - 6) {
+        if (my >= btn_y && my < btn_y + btn_h && mx >= go_x && mx < cw - 4) {
             url_focused = 0;
             navigate(url_bar);
+            return;
+        }
+
+        /* Scrollbar click */
+        int sb_x = cw - SCROLLBAR_W;
+        if (mx >= sb_x && my >= content_y && my < content_y + content_h) {
+            /* Calculate thumb position */
+            int total_h = content_total_h > content_h ? content_total_h : content_h;
+            int thumb_h = content_h * content_h / total_h;
+            if (thumb_h < 20) thumb_h = 20;
+            if (thumb_h > content_h) thumb_h = content_h;
+            int max_scroll = total_h - content_h;
+            if (max_scroll < 1) max_scroll = 1;
+            int thumb_y = content_y + (scroll_y * (content_h - thumb_h)) / max_scroll;
+
+            if (my >= thumb_y && my < thumb_y + thumb_h) {
+                /* Start dragging thumb */
+                scrollbar_dragging = 1;
+                scrollbar_drag_offset = my - thumb_y;
+            } else if (my < thumb_y) {
+                /* Click above thumb: page up */
+                scroll_y -= content_h;
+                if (scroll_y < 0) scroll_y = 0;
+            } else {
+                /* Click below thumb: page down */
+                scroll_y += content_h;
+                if (scroll_y > max_scroll) scroll_y = max_scroll;
+            }
             return;
         }
 
@@ -801,15 +1341,21 @@ static void browser_mouse(window_t *win, int mx, int my, int buttons)
         }
     }
 
-    /* Scroll with mouse wheel (buttons & 8 = scroll up, & 16 = scroll down) */
-    /* Note: In nextOS, mouse scrolling is handled via button flags */
+    if (release) {
+        scrollbar_dragging = 0;
+    }
 }
 
 /* ── Keyboard ────────────────────────────────────────────────────────── */
 static void browser_key(window_t *win, char ascii, int scancode, int pressed)
 {
     if (!win || !pressed) return;
-    (void)scancode;
+
+    /* F5 = Refresh */
+    if (scancode == 0x3F) {
+        refresh_page();
+        return;
+    }
 
     if (url_focused) {
         if (ascii == '\n' || ascii == '\r') {
@@ -828,6 +1374,28 @@ static void browser_key(window_t *win, char ascii, int scancode, int pressed)
             }
             return;
         }
+        /* Delete key */
+        if (scancode == 0x53) {
+            int len = str_len(url_bar);
+            if (url_cursor < len) {
+                for (int i = url_cursor; i < len; i++)
+                    url_bar[i] = url_bar[i + 1];
+            }
+            return;
+        }
+        /* Left/Right arrow in URL bar */
+        if (scancode == 0x4B) { /* Left */
+            if (url_cursor > 0) url_cursor--;
+            return;
+        }
+        if (scancode == 0x4D) { /* Right */
+            if (url_cursor < str_len(url_bar)) url_cursor++;
+            return;
+        }
+        /* Home/End in URL bar */
+        if (scancode == 0x47) { url_cursor = 0; return; }
+        if (scancode == 0x4F) { url_cursor = str_len(url_bar); return; }
+
         if (ascii >= 32 && ascii <= 126) {
             int len = str_len(url_bar);
             if (len < URL_MAX - 1) {
@@ -868,7 +1436,7 @@ void browser_launch(void)
 {
     if (browser_win && browser_win->active) return;
 
-    browser_win = compositor_create_window("Browser", 80, 40, 640, 480);
+    browser_win = compositor_create_window("Browser", 80, 40, 700, 500);
     if (!browser_win) return;
 
     browser_win->on_paint = browser_paint;
@@ -876,7 +1444,14 @@ void browser_launch(void)
     browser_win->on_key   = browser_key;
     browser_win->on_close = browser_close;
 
+    /* Reset state */
+    history_count = 0;
+    history_pos = -1;
+    scrollbar_dragging = 0;
+    content_total_h = 0;
+
     /* Load default homepage */
     load_homepage();
+    history_push("about:home");
     prev_buttons = 0;
 }
