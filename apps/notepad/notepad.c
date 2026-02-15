@@ -331,6 +331,7 @@ static void notepad_paint(window_t *win)
 /* Build a full path from user input — default to /Documents/ if no path prefix */
 static void build_full_path(const char *input, char *out, int max_len)
 {
+    if (max_len <= 0) return;
     /* If input already starts with / and is a ramfs path, use as-is */
     if (input[0] == '/') {
         int i = 0;
