@@ -559,10 +559,10 @@ static void draw_desktop_icons(void)
 /* ── Start menu ──────────────────────────────────────────────────────── */
 #define START_MENU_W 180
 #define START_MENU_ITEM_H 32
-#define START_MENU_ITEMS 6
+#define START_MENU_ITEMS 7
 
 static const char *start_menu_labels[START_MENU_ITEMS] = {
-    "Settings", "File Explorer", "Notepad",
+    "Settings", "File Explorer", "Notepad", "Browser",
     "About nextOS", "Restart", "Shutdown"
 };
 
@@ -587,19 +587,19 @@ static void draw_start_menu(void)
     /* Items */
     for (int i = 0; i < START_MENU_ITEMS; i++) {
         int iy = my + 4 + i * START_MENU_ITEM_H;
-        if (i >= 3) iy += separator_h;  /* offset items after separator */
+        if (i >= 4) iy += separator_h;  /* offset items after separator */
         fb_draw_string(mx + 12, iy + 8, start_menu_labels[i], tc->taskbar_text, 0x00000000);
         /* Separator line between items (but not after last) */
-        if (i < START_MENU_ITEMS - 1 && i != 2) {
+        if (i < START_MENU_ITEMS - 1 && i != 3) {
             for (int sx = mx + 4; sx < mx + START_MENU_W - 4; sx++)
                 fb_putpixel(sx, iy + START_MENU_ITEM_H - 1,
                             rgba_blend(fb_getpixel(sx, iy + START_MENU_ITEM_H - 1), 0x000000, 30));
         }
     }
 
-    /* Draw thicker separator line between Notepad and About */
+    /* Draw thicker separator line between Browser and About */
     {
-        int sep_y = my + 4 + 3 * START_MENU_ITEM_H;
+        int sep_y = my + 4 + 4 * START_MENU_ITEM_H;
         for (int row = 0; row < separator_h; row++) {
             for (int sx = mx + 4; sx < mx + START_MENU_W - 4; sx++) {
                 if (row == separator_h / 2)
@@ -907,12 +907,12 @@ void compositor_handle_mouse(int mx, int my, int buttons)
                 my >= menu_y && my < menu_y + mh) {
                 int rel_y = my - menu_y - 4;
                 int item;
-                if (rel_y < 3 * START_MENU_ITEM_H) {
+                if (rel_y < 4 * START_MENU_ITEM_H) {
                     item = rel_y / START_MENU_ITEM_H;
-                } else if (rel_y < 3 * START_MENU_ITEM_H + separator_h) {
+                } else if (rel_y < 4 * START_MENU_ITEM_H + separator_h) {
                     item = -1;
                 } else {
-                    item = 3 + (rel_y - 3 * START_MENU_ITEM_H - separator_h) / START_MENU_ITEM_H;
+                    item = 4 + (rel_y - 4 * START_MENU_ITEM_H - separator_h) / START_MENU_ITEM_H;
                 }
                 if (item >= 0 && item < START_MENU_ITEMS) {
                     start_menu_open = 0;
