@@ -227,7 +227,7 @@ static void draw_dialog(uint32_t *canvas, int cw, int ch)
         return;
     }
 
-    int dw = 300, dh = 100;
+    int dw = 300, dh = 110;
     int dx = (cw - dw) / 2, dy = (ch - dh) / 2;
 
     fill_rect(canvas, cw, ch, dx, dy, dw, dh, COL_DIALOG_BG);
@@ -245,15 +245,18 @@ static void draw_dialog(uint32_t *canvas, int cw, int ch)
     const char *title = (dialog_mode == 1) ? "Open File:" : "Save File:";
     canvas_draw_string(canvas, cw, ch, dx + 20, dy + 12, title, 0x1A1A1A);
 
+    /* Hint: files default to /Documents/ */
+    canvas_draw_string(canvas, cw, ch, dx + 20, dy + 28, "(in /Documents/)", 0x808080);
+
     /* Input field */
-    fill_rect(canvas, cw, ch, dx + 20, dy + 40, dw - 40, 24, COL_INPUT_BG);
+    fill_rect(canvas, cw, ch, dx + 20, dy + 44, dw - 40, 24, COL_INPUT_BG);
     /* Draw current input text */
-    canvas_draw_string(canvas, cw, ch, dx + 24, dy + 44, dialog_input, 0x1A1A1A);
+    canvas_draw_string(canvas, cw, ch, dx + 24, dy + 48, dialog_input, 0x1A1A1A);
 
     /* OK button */
-    draw_gradient(canvas, cw, ch, dx + dw - 80, dy + dh - 32, 60, 24,
+    draw_gradient(canvas, cw, ch, dx + dw - 80, dy + dh - 36, 60, 24,
                   COL_BTN_T, COL_BTN_B);
-    canvas_draw_string(canvas, cw, ch, dx + dw - 68, dy + dh - 28, "OK", 0x1A1A1A);
+    canvas_draw_string(canvas, cw, ch, dx + dw - 68, dy + dh - 32, "OK", 0x1A1A1A);
 }
 
 /* ── Paint callback ───────────────────────────────────────────────────── */
@@ -325,11 +328,33 @@ static void notepad_paint(window_t *win)
     }
 }
 
+/* Build a full path from user input — default to /Documents/ if no path prefix */
+static void build_full_path(const char *input, char *out, int max_len)
+{
+    /* If input already starts with / and is a ramfs path, use as-is */
+    if (input[0] == '/') {
+        int i = 0;
+        while (input[i] && i < max_len - 1) { out[i] = input[i]; i++; }
+        out[i] = 0;
+        return;
+    }
+    /* Prepend /Documents/ */
+    const char *prefix = "/Documents/";
+    int pi = 0;
+    while (prefix[pi] && pi < max_len - 1) { out[pi] = prefix[pi]; pi++; }
+    int ii = 0;
+    while (input[ii] && pi < max_len - 1) { out[pi++] = input[ii++]; }
+    out[pi] = 0;
+}
+
 /* ── File I/O ─────────────────────────────────────────────────────────── */
 static void load_file(const char *path)
 {
+    char full_path[MAX_PATH];
+    build_full_path(path, full_path, MAX_PATH);
+
     vfs_node_t node;
-    if (vfs_open(path, &node) != 0) return;
+    if (vfs_open(full_path, &node) != 0) return;
     if (node.type != VFS_FILE) return;
 
     int bytes = vfs_read(&node, 0, TEXT_MAX - 1, text_buf);
@@ -347,7 +372,7 @@ static void load_file(const char *path)
     /* Store file path only on successful read */
     if (bytes > 0) {
         int i = 0;
-        while (path[i] && i < MAX_PATH - 1) { file_path[i] = path[i]; i++; }
+        while (full_path[i] && i < MAX_PATH - 1) { file_path[i] = full_path[i]; i++; }
         file_path[i] = 0;
     } else {
         file_path[0] = 0;
@@ -356,19 +381,22 @@ static void load_file(const char *path)
 
 static void save_file(const char *path)
 {
+    char full_path[MAX_PATH];
+    build_full_path(path, full_path, MAX_PATH);
+
     vfs_node_t node;
     /* Try to open existing file first */
-    if (vfs_open(path, &node) != 0) {
+    if (vfs_open(full_path, &node) != 0) {
         /* File doesn't exist, try to create it */
-        if (vfs_create(path, VFS_FILE) != 0) return;
-        if (vfs_open(path, &node) != 0) return;
+        if (vfs_create(full_path, VFS_FILE) != 0) return;
+        if (vfs_open(full_path, &node) != 0) return;
     }
     vfs_write(&node, 0, text_len, text_buf);
     modified = 0;
 
     /* Update stored path */
     int i = 0;
-    while (path[i] && i < MAX_PATH - 1) { file_path[i] = path[i]; i++; }
+    while (full_path[i] && i < MAX_PATH - 1) { file_path[i] = full_path[i]; i++; }
     file_path[i] = 0;
 }
 
@@ -460,12 +488,12 @@ static void notepad_mouse(window_t *win, int mx, int my, int buttons)
             return;
         }
 
-        int dw = 300, dh = 100;
+        int dw = 300, dh = 110;
         int dx = (cw - dw) / 2, dy = (ch - dh) / 2;
 
         /* OK button */
         if (mx >= dx + dw - 80 && mx < dx + dw - 20 &&
-            my >= dy + dh - 32 && my < dy + dh - 8) {
+            my >= dy + dh - 36 && my < dy + dh - 12) {
             dialog_input[dialog_input_len] = 0;
             if (dialog_mode == 1) {
                 load_file(dialog_input);
