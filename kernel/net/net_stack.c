@@ -762,6 +762,10 @@ static uint8_t tls_server_write_mac_key[32];
 static uint64_t tls_client_seq;
 static uint64_t tls_server_seq;
 
+/* Negotiated cipher suite info */
+static uint16_t tls_cipher_suite;   /* Selected cipher suite ID */
+static int tls_mac_len;             /* MAC length: 20 for SHA-1, 32 for SHA-256 */
+
 /* Handshake message accumulator for Finished verification */
 #define TLS_HS_BUF_SIZE 8192
 static uint8_t tls_hs_buf[TLS_HS_BUF_SIZE];
@@ -881,6 +885,8 @@ static int tls_send_client_hello(const char *host)
 
     /* Accumulate handshake message (without record header) */
     tls_hs_len = 0;
+    tls_cipher_suite = 0x003C;  /* Default: AES_128_CBC_SHA256 */
+    tls_mac_len = 32;
     tls_hs_accumulate(msg + hs_start, rec_payload_len);
 
     return tcp_send_data(msg, pos);
@@ -942,6 +948,16 @@ static int tls_process_server_handshake(rsa_pubkey_t *server_key)
                     if (hs_len >= 34) {
                         mem_copy(tls_server_random, tls_recv_buf + hpos + 6, 32);
                     }
+                    /* Extract selected cipher suite */
+                    if (hs_len >= 37) {
+                        int body = hpos + 4;
+                        int sid_len = tls_recv_buf[body + 34];
+                        int cs_off = body + 35 + sid_len;
+                        if (cs_off + 2 <= hpos + 4 + hs_len) {
+                            tls_cipher_suite = ((uint16_t)tls_recv_buf[cs_off] << 8) |
+                                                tls_recv_buf[cs_off + 1];
+                        }
+                    }
                     got_hello = 1;
                 } else if (hs_type == TLS_CERTIFICATE) {
                     /* Extract first certificate */
@@ -987,6 +1003,15 @@ static int tls_process_server_handshake(rsa_pubkey_t *server_key)
 /* Derive master secret and key material */
 static void tls_derive_keys(const uint8_t *pre_master_secret)
 {
+    /* Determine MAC length from negotiated cipher suite:
+     * 0x002F = AES_128_CBC_SHA    -> HMAC-SHA-1   (20 bytes)
+     * 0x003C = AES_128_CBC_SHA256 -> HMAC-SHA-256 (32 bytes)
+     * 0x0035 = AES_256_CBC_SHA    -> HMAC-SHA-1   (20 bytes) */
+    if (tls_cipher_suite == 0x003C)
+        tls_mac_len = 32;
+    else
+        tls_mac_len = 20;
+
     /* master_secret = PRF(pre_master_secret, "master secret",
      *                     ClientHello.random + ServerHello.random) */
     uint8_t seed[64];
@@ -1001,15 +1026,16 @@ static void tls_derive_keys(const uint8_t *pre_master_secret)
     mem_copy(ks_seed, tls_server_random, 32);
     mem_copy(ks_seed + 32, tls_client_random, 32);
 
-    /* For AES_128_CBC_SHA256: mac_key=32, enc_key=16, IV=16 per side
-     * Total: 2*(32+16+16) = 128 bytes */
+    /* Key material: 2*(mac_key + enc_key(16) + IV(16))
+     * SHA-256: 2*(32+16+16) = 128,  SHA-1: 2*(20+16+16) = 104 */
+    int kb_len = 2 * (tls_mac_len + 16 + 16);
     uint8_t key_block[128];
     tls_prf_sha256(tls_master_secret, 48, "key expansion", ks_seed, 64,
-                   key_block, 128);
+                   key_block, kb_len);
 
     int off = 0;
-    mem_copy(tls_client_write_mac_key, key_block + off, 32); off += 32;
-    mem_copy(tls_server_write_mac_key, key_block + off, 32); off += 32;
+    mem_copy(tls_client_write_mac_key, key_block + off, tls_mac_len); off += tls_mac_len;
+    mem_copy(tls_server_write_mac_key, key_block + off, tls_mac_len); off += tls_mac_len;
     mem_copy(tls_client_write_key, key_block + off, 16); off += 16;
     mem_copy(tls_server_write_key, key_block + off, 16); off += 16;
     mem_copy(tls_client_write_iv, key_block + off, 16); off += 16;
@@ -1085,14 +1111,13 @@ static int tls_send_change_cipher_spec(void)
     return tcp_send_data(msg, 6);
 }
 
-/* Compute MAC for a TLS record (HMAC-SHA-256) */
+/* Compute MAC for a TLS record (HMAC-SHA-256 or HMAC-SHA-1) */
 static void tls_compute_mac(const uint8_t *mac_key,
                             uint64_t seq_num, uint8_t rec_type,
                             const uint8_t *data, int data_len,
-                            uint8_t mac_out[32])
+                            uint8_t *mac_out)
 {
-    /* MAC input: seq_num(8) + type(1) + version(2) + length(2) + data
-     * Use HMAC incrementally to avoid large stack buffer */
+    /* MAC input: seq_num(8) + type(1) + version(2) + length(2) + data */
     uint8_t header[13];
     int hi = 0;
     for (int i = 7; i >= 0; i--)
@@ -1103,33 +1128,47 @@ static void tls_compute_mac(const uint8_t *mac_key,
     header[hi++] = (uint8_t)(data_len >> 8);
     header[hi++] = (uint8_t)(data_len & 0xFF);
 
-    /* HMAC-SHA-256 over header + data */
     uint8_t k_pad[64];
-    sha256_ctx_t ctx;
-    const uint8_t *key = mac_key;
-    int key_len = 32;
 
-    /* ipad */
-    mem_zero(k_pad, 64);
-    mem_copy(k_pad, key, key_len);
-    for (int i = 0; i < 64; i++) k_pad[i] ^= 0x36;
-
-    sha256_init(&ctx);
-    sha256_update(&ctx, k_pad, 64);
-    sha256_update(&ctx, header, 13);
-    sha256_update(&ctx, data, data_len);
-    uint8_t inner[32];
-    sha256_final(&ctx, inner);
-
-    /* opad */
-    mem_zero(k_pad, 64);
-    mem_copy(k_pad, key, key_len);
-    for (int i = 0; i < 64; i++) k_pad[i] ^= 0x5c;
-
-    sha256_init(&ctx);
-    sha256_update(&ctx, k_pad, 64);
-    sha256_update(&ctx, inner, 32);
-    sha256_final(&ctx, mac_out);
+    if (tls_mac_len == 20) {
+        /* HMAC-SHA-1 */
+        sha1_ctx_t ctx;
+        mem_zero(k_pad, 64);
+        mem_copy(k_pad, mac_key, tls_mac_len);
+        for (int i = 0; i < 64; i++) k_pad[i] ^= 0x36;
+        sha1_init(&ctx);
+        sha1_update(&ctx, k_pad, 64);
+        sha1_update(&ctx, header, 13);
+        sha1_update(&ctx, data, data_len);
+        uint8_t inner[20];
+        sha1_final(&ctx, inner);
+        mem_zero(k_pad, 64);
+        mem_copy(k_pad, mac_key, tls_mac_len);
+        for (int i = 0; i < 64; i++) k_pad[i] ^= 0x5c;
+        sha1_init(&ctx);
+        sha1_update(&ctx, k_pad, 64);
+        sha1_update(&ctx, inner, 20);
+        sha1_final(&ctx, mac_out);
+    } else {
+        /* HMAC-SHA-256 */
+        sha256_ctx_t ctx;
+        mem_zero(k_pad, 64);
+        mem_copy(k_pad, mac_key, tls_mac_len);
+        for (int i = 0; i < 64; i++) k_pad[i] ^= 0x36;
+        sha256_init(&ctx);
+        sha256_update(&ctx, k_pad, 64);
+        sha256_update(&ctx, header, 13);
+        sha256_update(&ctx, data, data_len);
+        uint8_t inner[32];
+        sha256_final(&ctx, inner);
+        mem_zero(k_pad, 64);
+        mem_copy(k_pad, mac_key, tls_mac_len);
+        for (int i = 0; i < 64; i++) k_pad[i] ^= 0x5c;
+        sha256_init(&ctx);
+        sha256_update(&ctx, k_pad, 64);
+        sha256_update(&ctx, inner, 32);
+        sha256_final(&ctx, mac_out);
+    }
 }
 
 /* Send encrypted TLS record */
@@ -1140,8 +1179,8 @@ static int tls_send_encrypted(uint8_t rec_type, const uint8_t *data, int data_le
     tls_compute_mac(tls_client_write_mac_key, tls_client_seq,
                     rec_type, data, data_len, mac);
 
-    int plain_len = data_len + 32;  /* data + MAC */
-    /* PKCS#7 padding for AES-CBC */
+    int plain_len = data_len + tls_mac_len;  /* data + MAC */
+    /* TLS padding for AES-CBC */
     int pad = 16 - (plain_len % 16);
     int total_plain = plain_len + pad;
 
@@ -1153,7 +1192,7 @@ static int tls_send_encrypted(uint8_t rec_type, const uint8_t *data, int data_le
     uint8_t *pt = (uint8_t *)kmalloc(total_plain);
     if (!pt) return -1;
     mem_copy(pt, data, data_len);
-    mem_copy(pt + data_len, mac, 32);
+    mem_copy(pt + data_len, mac, tls_mac_len);
     for (int i = 0; i < pad; i++)
         pt[plain_len + i] = (uint8_t)(pad - 1);  /* TLS padding value = pad_len - 1 */
 
@@ -1227,9 +1266,9 @@ static int tls_decrypt_record(const uint8_t *data, int data_len,
     if (pad_count > ct_len) return -1;
 
     int content_plus_mac = ct_len - pad_count;
-    /* MAC is 32 bytes (SHA-256) */
-    if (content_plus_mac < 32) return -1;
-    int content_len = content_plus_mac - 32;
+    /* MAC length depends on cipher suite */
+    if (content_plus_mac < tls_mac_len) return -1;
+    int content_len = content_plus_mac - tls_mac_len;
 
     tls_server_seq++;
     return content_len;
@@ -1255,6 +1294,9 @@ static int tls_send_finished(void)
     finished[3] = 12;
     mem_copy(finished + 4, verify_data, 12);
 
+    /* Accumulate client Finished in HS hash (needed for server Finished) */
+    tls_hs_accumulate(finished, 16);
+
     return tls_send_encrypted(TLS_HANDSHAKE, finished, 16);
 }
 
@@ -1273,14 +1315,29 @@ static int tls_receive_server_finished(void)
         if (rec_type == TLS_CHANGE_CIPHER) {
             got_ccs = 1;
         } else if (rec_type == TLS_HANDSHAKE && got_ccs) {
-            /* This should be encrypted Finished - decrypt it */
+            /* Encrypted Finished - decrypt it */
             uint8_t pt[256];
             int pt_len = tls_decrypt_record(tls_recv_buf, rec_len, pt, sizeof(pt));
-            if (pt_len >= 0) {
-                got_finished = 1;
-            } else {
-                return -1;
+            if (pt_len < 16) return -1;
+
+            /* Verify: pt should be Finished(20) + verify_data(12) */
+            if (pt[0] != TLS_FINISHED) return -1;
+
+            /* Compute expected server verify_data */
+            uint8_t hs_hash[32];
+            sha256(tls_hs_buf, tls_hs_len, hs_hash);
+            uint8_t expected[12];
+            tls_prf_sha256(tls_master_secret, 48, "server finished",
+                           hs_hash, 32, expected, 12);
+
+            /* Compare (skip HS header: type(1) + length(3) = 4 bytes) */
+            int ok = 1;
+            for (int i = 0; i < 12; i++) {
+                if (pt[4 + i] != expected[i]) { ok = 0; break; }
             }
+            if (!ok) return -1;
+
+            got_finished = 1;
         }
     }
     return 0;
