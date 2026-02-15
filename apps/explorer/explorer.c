@@ -11,6 +11,7 @@
 #include "kernel/fs/vfs.h"
 #include "kernel/mem/heap.h"
 #include "apps/notepad/notepad.h"
+#include "kernel/drivers/timer.h"
 
 /* ── State ────────────────────────────────────────────────────────────── */
 #define MAX_ENTRIES  128
@@ -29,6 +30,11 @@ static int         scroll_offset = 0;
 static char        current_path[PATH_MAX_LEN] = "/";
 static int         scrollbar_dragging = 0;
 static int         scrollbar_drag_offset = 0;
+
+/* Double-click state for file opening */
+#define DBLCLICK_MS 500
+static int         last_click_index = -1;
+static uint64_t    last_click_tick  = 0;
 
 /* Context menu state */
 static int         ctx_menu_open = 0;
@@ -778,15 +784,17 @@ static void explorer_mouse(window_t *win, int mx, int my, int buttons)
         int vi = (my - list_y) / ENTRY_HEIGHT;
         int ei = scroll_offset + vi;
         if (ei < entry_count) {
-            if (ei == selected_index) {
+            uint64_t now = timer_get_ticks();
+            if (last_click_index == ei &&
+                (now - last_click_tick) < DBLCLICK_MS) {
+                /* Double-click detected */
+                last_click_index = -1;
                 if (entries[ei].type == VFS_DIRECTORY) {
-                    /* Double-click on directory: navigate into it */
                     str_cat(current_path, entries[ei].name);
                     str_cat(current_path, "/");
                     current_dir = entries[ei];
                     refresh_listing();
                 } else {
-                    /* Double-click on file: open in notepad */
                     char fpath[PATH_MAX_LEN];
                     fpath[0] = 0;
                     str_cat(fpath, current_path);
@@ -794,7 +802,10 @@ static void explorer_mouse(window_t *win, int mx, int my, int buttons)
                     notepad_open_file(fpath);
                 }
             } else {
+                /* Single click: select */
                 selected_index = ei;
+                last_click_index = ei;
+                last_click_tick = now;
             }
         }
     }

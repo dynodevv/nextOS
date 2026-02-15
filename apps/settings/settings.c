@@ -544,4 +544,13 @@ void settings_launch(void)
     settings_win->on_mouse = settings_mouse;
     settings_win->on_key   = settings_key;
     settings_win->on_close = settings_close;
+
+    /* Sync UI state with actual system state (loaded from disk at boot) */
+    theme_index    = (int)compositor_get_theme();
+    kb_layout_index = (int)keyboard_get_layout();
+    /* Scroll keyboard list so the selected layout is visible */
+    if (kb_layout_index >= KB_VISIBLE_ROWS)
+        kb_scroll_offset = kb_layout_index - KB_VISIBLE_ROWS + 1;
+    else
+        kb_scroll_offset = 0;
 }
