@@ -33,7 +33,10 @@ typedef struct {
     uint32_t s_rev_level;
     uint16_t s_def_resuid;
     uint16_t s_def_resgid;
-    /* ... extended fields omitted for brevity ... */
+    /* Rev1 extended fields */
+    uint32_t s_first_ino;
+    uint16_t s_inode_size;
+    /* ... remaining fields omitted for brevity ... */
 } __attribute__((packed)) ext2_superblock_t;
 
 /* ── Block Group Descriptor ──────────────────────────────────────────── */
@@ -179,7 +182,13 @@ static int try_ext2_at(uint32_t start_lba)
     if (sb.s_magic != EXT2_MAGIC) return -1;
 
     block_size = 1024U << sb.s_log_block_size;
-    inode_size = 128;  /* Standard inode size for rev0 and rev1 */
+
+    /* Read inode size: rev0 uses 128, rev1+ stores it in superblock */
+    if (sb.s_rev_level >= 1 && sb.s_inode_size > 0) {
+        inode_size = sb.s_inode_size;
+    } else {
+        inode_size = 128;
+    }
 
     block_buf = kmalloc(block_size);
     return block_buf ? 0 : -1;

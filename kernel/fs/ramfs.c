@@ -505,7 +505,17 @@ static void ramfs_load_from_disk(void)
     for (uint32_t e = 0; e < count; e++) {
         if (disk_read(disk, lba, 1, sector) < 0) return;
         ramfs_disk_entry_t *de = (ramfs_disk_entry_t *)sector;
+
+        /* Save metadata before sector buffer is reused for data reads */
+        char saved_name[128];
+        char saved_parent[256];
+        uint32_t saved_type = de->type;
+        uint32_t saved_size = de->size;
+        ramfs_strcpy(saved_name, de->name);
+        ramfs_strcpy(saved_parent, de->parent);
         lba++;
+
+        uint32_t data_sectors = (saved_size + 511) / 512;
 
         /* Find free slot */
         int slot = -1;
@@ -515,25 +525,23 @@ static void ramfs_load_from_disk(void)
         if (slot < 0) return;
 
         /* Check for duplicates (shouldn't happen, but be safe) */
-        if (find_entry(de->parent, de->name) >= 0) {
+        if (find_entry(saved_parent, saved_name) >= 0) {
             /* Skip duplicate — advance past data sectors */
-            uint32_t data_sectors = (de->size + 511) / 512;
             lba += data_sectors;
             continue;
         }
 
-        ramfs_strcpy(entries[slot].name, de->name);
-        ramfs_strcpy(entries[slot].parent, de->parent);
-        entries[slot].type = (vfs_node_type_t)de->type;
-        entries[slot].size = de->size;
+        ramfs_strcpy(entries[slot].name, saved_name);
+        ramfs_strcpy(entries[slot].parent, saved_parent);
+        entries[slot].type = (vfs_node_type_t)saved_type;
+        entries[slot].size = saved_size;
         entries[slot].used = 1;
         entry_count++;
 
         /* Read data */
-        uint32_t data_sectors = (de->size + 511) / 512;
-        if (de->size > 0) {
-            entries[slot].data = (uint8_t *)kmalloc(de->size);
-            entries[slot].capacity = de->size;
+        if (saved_size > 0) {
+            entries[slot].data = (uint8_t *)kmalloc(saved_size);
+            entries[slot].capacity = saved_size;
             if (!entries[slot].data) {
                 entries[slot].size = 0;
                 entries[slot].capacity = 0;
@@ -543,7 +551,7 @@ static void ramfs_load_from_disk(void)
             for (uint32_t s = 0; s < data_sectors; s++) {
                 if (disk_read(disk, lba + s, 1, sector) < 0) break;
                 uint32_t offset = s * 512;
-                uint32_t chunk = de->size - offset;
+                uint32_t chunk = saved_size - offset;
                 if (chunk > 512) chunk = 512;
                 for (uint32_t j = 0; j < chunk; j++)
                     entries[slot].data[offset + j] = sector[j];
