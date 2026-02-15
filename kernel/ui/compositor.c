@@ -335,7 +335,7 @@ static void draw_window(window_t *win)
             for (int col = 0; col < w; col++) {
                 int px = x + col, py = y + row;
                 uint32_t orig = fb_getpixel(px, py);
-                fb_putpixel(px, py, rgba_blend(orig, 0x000000, 30));
+                fb_putpixel(px, py, rgba_blend(orig, 0x000000, 60));
             }
         }
     }

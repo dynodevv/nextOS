@@ -39,6 +39,12 @@ static char        clipboard_path[PATH_MAX_LEN] = "";
 static char        clipboard_name[VFS_MAX_NAME] = "";
 static int         clipboard_cut = 0;  /* 0=copy, 1=cut */
 
+/* Rename dialog state */
+static int         rename_dialog_active = 0;
+static int         rename_target_index = -1;
+static char        rename_input[VFS_MAX_NAME] = "";
+static int         rename_input_len = 0;
+
 /* Sidebar quick-access folders */
 typedef struct { const char *label; const char *path; } sidebar_item_t;
 static const sidebar_item_t sidebar_folders[] = {
@@ -333,7 +339,7 @@ static void explorer_paint(window_t *win)
                            entries[ei].name, text_c);
 
         /* System file indicator (lock icon hint) */
-        if (is_system_path(current_path) || is_system_entry(ei)) {
+        if (is_system_entry(ei)) {
             canvas_draw_string(win->canvas, cw, ch, file_x + file_w - 16, ey + 4,
                                "*", 0xA04040);
         }
@@ -372,7 +378,7 @@ static void explorer_paint(window_t *win)
         #define CTX_MENU_W 100
         #define CTX_MENU_ITEM_H 22
         static const char *ctx_labels[] = { "Rename", "Delete", "Copy", "Cut", "Paste" };
-        int ctx_items = 5;
+        int ctx_items = (ctx_menu_open == 2) ? 1 : 5;  /* empty-space: Paste only */
         int cmh = ctx_items * CTX_MENU_ITEM_H + 4;
         int cmx = ctx_menu_x;
         int cmy = ctx_menu_y;
@@ -394,16 +400,61 @@ static void explorer_paint(window_t *win)
         }
         /* Items */
         int protected = (ctx_menu_target >= 0 && is_system_entry(ctx_menu_target));
-        for (int i = 0; i < ctx_items; i++) {
-            int iy = cmy + 2 + i * CTX_MENU_ITEM_H;
-            uint32_t fg = COL_TEXT;
-            /* Grey out rename/delete/cut for system files */
-            if (protected && (i == 0 || i == 1 || i == 3)) fg = 0xA0A0A0;
-            canvas_draw_string(win->canvas, cw, ch, cmx + 8, iy + 3,
-                               ctx_labels[i], fg);
+        if (ctx_menu_open == 2) {
+            /* Empty-space: show only Paste */
+            int iy = cmy + 2;
+            uint32_t fg = clipboard_path[0] ? COL_TEXT : 0xA0A0A0;
+            canvas_draw_string(win->canvas, cw, ch, cmx + 8, iy + 3, "Paste", fg);
+        } else {
+            for (int i = 0; i < ctx_items; i++) {
+                int iy = cmy + 2 + i * CTX_MENU_ITEM_H;
+                uint32_t fg = COL_TEXT;
+                /* Grey out rename/delete/cut for system files */
+                if (protected && (i == 0 || i == 1 || i == 3)) fg = 0xA0A0A0;
+                canvas_draw_string(win->canvas, cw, ch, cmx + 8, iy + 3,
+                                   ctx_labels[i], fg);
+            }
         }
         #undef CTX_MENU_W
         #undef CTX_MENU_ITEM_H
+    }
+
+    /* Rename dialog overlay */
+    if (rename_dialog_active) {
+        int dw = 280, dh = 90;
+        int dx = (cw - dw) / 2, dy = (ch - dh) / 2;
+        /* Shadow */
+        fill_rect(win->canvas, cw, ch, dx + 3, dy + 3, dw, dh, 0x404040);
+        /* Background */
+        fill_rect(win->canvas, cw, ch, dx, dy, dw, dh, 0xF0EAD8);
+        /* Border */
+        for (int i = dx; i < dx + dw; i++) {
+            if (dy >= 0 && dy < ch) win->canvas[dy * cw + i] = 0x807060;
+            if (dy + dh - 1 < ch) win->canvas[(dy + dh - 1) * cw + i] = 0x807060;
+        }
+        for (int i = dy; i < dy + dh; i++) {
+            if (dx >= 0) win->canvas[i * cw + dx] = 0x807060;
+            if (dx + dw - 1 < cw) win->canvas[i * cw + dx + dw - 1] = 0x807060;
+        }
+        /* Title */
+        canvas_draw_string(win->canvas, cw, ch, dx + 10, dy + 8, "Rename:", COL_TEXT);
+        /* Input field */
+        fill_rect(win->canvas, cw, ch, dx + 10, dy + 28, dw - 20, 22, 0xFFFFF0);
+        /* Input border */
+        for (int i = dx + 10; i < dx + dw - 10; i++) {
+            win->canvas[(dy + 28) * cw + i] = 0x807060;
+            win->canvas[(dy + 49) * cw + i] = 0x807060;
+        }
+        for (int i = dy + 28; i < dy + 50; i++) {
+            win->canvas[i * cw + dx + 10] = 0x807060;
+            win->canvas[i * cw + dx + dw - 11] = 0x807060;
+        }
+        canvas_draw_string(win->canvas, cw, ch, dx + 14, dy + 31, rename_input, 0x1A1A1A);
+        /* OK / Cancel buttons */
+        fill_rect(win->canvas, cw, ch, dx + dw - 140, dy + dh - 28, 60, 22, 0xD8D0C0);
+        canvas_draw_string(win->canvas, cw, ch, dx + dw - 128, dy + dh - 24, "OK", COL_TEXT);
+        fill_rect(win->canvas, cw, ch, dx + dw - 70, dy + dh - 28, 60, 22, 0xD8D0C0);
+        canvas_draw_string(win->canvas, cw, ch, dx + dw - 60, dy + dh - 24, "Cancel", COL_TEXT);
     }
 }
 
@@ -462,6 +513,36 @@ static void explorer_mouse(window_t *win, int mx, int my, int buttons)
         return;
     }
 
+    /* Rename dialog click handling */
+    if (rename_dialog_active && (buttons & 1)) {
+        int dw = 280, dh = 90;
+        int dx = (cw - dw) / 2, dy = (ch - dh) / 2;
+        /* OK button */
+        if (mx >= dx + dw - 140 && mx < dx + dw - 80 &&
+            my >= dy + dh - 28 && my < dy + dh - 6) {
+            if (rename_input_len > 0 && rename_target_index >= 0) {
+                char old_path[PATH_MAX_LEN];
+                build_entry_path(rename_target_index, old_path, PATH_MAX_LEN);
+                char new_path[PATH_MAX_LEN];
+                int ni = 0;
+                const char *cp = current_path;
+                while (*cp && ni < PATH_MAX_LEN - 1) new_path[ni++] = *cp++;
+                const char *rn = rename_input;
+                while (*rn && ni < PATH_MAX_LEN - 1) new_path[ni++] = *rn++;
+                new_path[ni] = 0;
+                vfs_rename(old_path, new_path);
+                refresh_listing();
+            }
+            rename_dialog_active = 0;
+        }
+        /* Cancel button */
+        if (mx >= dx + dw - 70 && mx < dx + dw - 10 &&
+            my >= dy + dh - 28 && my < dy + dh - 6) {
+            rename_dialog_active = 0;
+        }
+        return;
+    }
+
     /* Right-click: open context menu */
     if (buttons & 2) {
         if (my >= list_y && mx >= file_x) {
@@ -473,6 +554,12 @@ static void explorer_mouse(window_t *win, int mx, int my, int buttons)
                 ctx_menu_y = my;
                 ctx_menu_target = ei;
                 selected_index = ei;
+            } else {
+                /* Right-click in empty space: show Paste-only menu */
+                ctx_menu_open = 2;  /* 2 = empty-space mode */
+                ctx_menu_x = mx;
+                ctx_menu_y = my;
+                ctx_menu_target = -1;
             }
         }
         return;
@@ -482,11 +569,46 @@ static void explorer_mouse(window_t *win, int mx, int my, int buttons)
     if ((buttons & 1) && ctx_menu_open) {
         /* Check if click is inside context menu */
         int cmx = ctx_menu_x, cmy = ctx_menu_y;
-        int cmw = 100, cmh = 5 * 22 + 4;
+        int cmw = 100;
+        int ctx_items = (ctx_menu_open == 2) ? 1 : 5;
+        int cmh = ctx_items * 22 + 4;
         if (cmx + cmw > cw) cmx = cw - cmw;
         if (cmy + cmh > ch) cmy = ch - cmh;
         if (mx >= cmx && mx < cmx + cmw && my >= cmy && my < cmy + cmh) {
             int item = (my - cmy - 2) / 22;
+            if (ctx_menu_open == 2) {
+                /* Empty-space menu: item 0 = Paste */
+                if (item == 0 && clipboard_path[0]) {
+                    char dest_path[PATH_MAX_LEN];
+                    int di = 0;
+                    const char *cp = current_path;
+                    while (*cp && di < PATH_MAX_LEN - 1) dest_path[di++] = *cp++;
+                    cp = clipboard_name;
+                    while (*cp && di < PATH_MAX_LEN - 1) dest_path[di++] = *cp++;
+                    dest_path[di] = 0;
+                    vfs_node_t src_node;
+                    if (vfs_open(clipboard_path, &src_node) == 0 &&
+                        src_node.type == VFS_FILE) {
+                        char copy_buf[4096];
+                        uint64_t file_sz = src_node.size;
+                        if (file_sz > sizeof(copy_buf)) file_sz = sizeof(copy_buf);
+                        int bytes = vfs_read(&src_node, 0, file_sz, copy_buf);
+                        if (bytes > 0) {
+                            vfs_create(dest_path, VFS_FILE);
+                            vfs_node_t dst_node;
+                            if (vfs_open(dest_path, &dst_node) == 0) {
+                                vfs_write(&dst_node, 0, bytes, copy_buf);
+                            }
+                        }
+                    }
+                    if (clipboard_cut) {
+                        vfs_delete(clipboard_path);
+                        clipboard_path[0] = 0;
+                        clipboard_name[0] = 0;
+                    }
+                    refresh_listing();
+                }
+            } else {
             int protected = (ctx_menu_target >= 0 && is_system_entry(ctx_menu_target));
             if (item >= 0 && item < 5) {
                 char path_buf[PATH_MAX_LEN];
@@ -495,8 +617,16 @@ static void explorer_mouse(window_t *win, int mx, int my, int buttons)
                 switch (item) {
                 case 0: /* Rename */
                     if (!protected && ctx_menu_target >= 0) {
-                        /* Rename not yet supported by FS driver */
-                        vfs_rename(path_buf, path_buf);
+                        /* Start rename dialog */
+                        rename_dialog_active = 1;
+                        rename_target_index = ctx_menu_target;
+                        rename_input_len = 0;
+                        /* Pre-fill with current name */
+                        const char *n = entries[ctx_menu_target].name;
+                        while (*n && rename_input_len < VFS_MAX_NAME - 1) {
+                            rename_input[rename_input_len++] = *n++;
+                        }
+                        rename_input[rename_input_len] = 0;
                     }
                     break;
                 case 1: /* Delete */
@@ -550,6 +680,7 @@ static void explorer_mouse(window_t *win, int mx, int my, int buttons)
                             if (file_sz > sizeof(copy_buf)) file_sz = sizeof(copy_buf);
                             int bytes = vfs_read(&src_node, 0, file_sz, copy_buf);
                             if (bytes > 0) {
+                                vfs_create(dest_path, VFS_FILE);
                                 vfs_node_t dst_node;
                                 if (vfs_open(dest_path, &dst_node) == 0) {
                                     vfs_write(&dst_node, 0, bytes, copy_buf);
@@ -565,6 +696,7 @@ static void explorer_mouse(window_t *win, int mx, int my, int buttons)
                     }
                     break;
                 }
+            }
             }
         }
         ctx_menu_open = 0;
@@ -658,8 +790,40 @@ static void explorer_mouse(window_t *win, int mx, int my, int buttons)
 /* ── Key callback ─────────────────────────────────────────────────────── */
 static void explorer_key(window_t *win, char ascii, int scancode, int pressed)
 {
-    (void)win; (void)ascii;
+    (void)win;
     if (!pressed) return;
+
+    /* Rename dialog typing */
+    if (rename_dialog_active) {
+        if (ascii == '\b') {
+            if (rename_input_len > 0) rename_input[--rename_input_len] = 0;
+        } else if (ascii == '\n') {
+            /* Confirm rename */
+            if (rename_input_len > 0 && rename_target_index >= 0) {
+                char old_path[PATH_MAX_LEN];
+                build_entry_path(rename_target_index, old_path, PATH_MAX_LEN);
+                char new_path[PATH_MAX_LEN];
+                int ni = 0;
+                const char *cp = current_path;
+                while (*cp && ni < PATH_MAX_LEN - 1) new_path[ni++] = *cp++;
+                const char *rn = rename_input;
+                while (*rn && ni < PATH_MAX_LEN - 1) new_path[ni++] = *rn++;
+                new_path[ni] = 0;
+                vfs_rename(old_path, new_path);
+                refresh_listing();
+            }
+            rename_dialog_active = 0;
+        } else if (ascii == 27) {
+            /* Escape = cancel */
+            rename_dialog_active = 0;
+        } else if (ascii >= 32 && rename_input_len < VFS_MAX_NAME - 1) {
+            rename_input[rename_input_len++] = ascii;
+            rename_input[rename_input_len] = 0;
+        }
+        return;
+    }
+
+    (void)scancode;
 
     /* Up/Down arrow navigation */
     if (scancode == 0x48) { /* Up */
