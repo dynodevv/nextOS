@@ -788,12 +788,9 @@ static void explorer_mouse(window_t *win, int mx, int my, int buttons)
                 } else {
                     /* Double-click on file: open in notepad */
                     char fpath[PATH_MAX_LEN];
-                    int k = 0;
-                    const char *cp = current_path;
-                    while (*cp && k < PATH_MAX_LEN - 1) fpath[k++] = *cp++;
-                    const char *fn = entries[ei].name;
-                    while (*fn && k < PATH_MAX_LEN - 1) fpath[k++] = *fn++;
-                    fpath[k] = 0;
+                    fpath[0] = 0;
+                    str_cat(fpath, current_path);
+                    str_cat(fpath, entries[ei].name);
                     notepad_open_file(fpath);
                 }
             } else {

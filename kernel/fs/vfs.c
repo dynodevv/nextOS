@@ -26,6 +26,9 @@ static void vfs_strcpy(char *dst, const char *src)
 /* VFS root readdir: enumerates both disk FS entries and ramfs top-level dirs */
 static int vfs_root_readdir(vfs_node_t *dir, int index, vfs_node_t *child);
 
+/* Forward declaration for virtual config file read handler */
+static int cfg_read(vfs_node_t *node, uint64_t offset, uint64_t size, void *buf);
+
 void vfs_init(void)
 {
     disk_fs_ready = 0;
@@ -70,6 +73,19 @@ int vfs_open(const char *path, vfs_node_t *out)
     /* Check if this is a ramfs path */
     if (ramfs_is_ramfs_path(path)) {
         return ramfs_lookup(path, out);
+    }
+
+    /* Virtual nextos.cfg file */
+    if (vfs_strcmp(path, "/nextos.cfg") == 0) {
+        vfs_strcpy(out->name, "nextos.cfg");
+        out->type = VFS_FILE;
+        out->size = 0;
+        out->inode = 0;
+        out->fs_data = 0;
+        out->read = cfg_read;
+        out->write = (void *)0;
+        out->readdir = (void *)0;
+        return 0;
     }
 
     /* Walk the path components using disk filesystem */
@@ -173,6 +189,22 @@ static int is_ramfs_builtin(const char *name)
     return 0;
 }
 
+/* Virtual read handler for nextos.cfg — returns text description of settings */
+static int cfg_read(vfs_node_t *node, uint64_t offset, uint64_t size, void *buf)
+{
+    (void)node;
+    const char *content = "[nextOS Configuration]\nThis file stores system settings.\nManaged automatically by Settings app.\n";
+    int len = 0;
+    while (content[len]) len++;
+    if ((int)offset >= len) return 0;
+    int avail = len - (int)offset;
+    int to_copy = ((int)size < avail) ? (int)size : avail;
+    const char *src = content + offset;
+    char *dst = (char *)buf;
+    for (int i = 0; i < to_copy; i++) dst[i] = src[i];
+    return to_copy;
+}
+
 static int vfs_root_readdir(vfs_node_t *dir, int index, vfs_node_t *child)
 {
     (void)dir;
@@ -244,7 +276,7 @@ static int vfs_root_readdir(vfs_node_t *dir, int index, vfs_node_t *child)
         child->size = 0;
         child->inode = 0;
         child->fs_data = 0;
-        child->read = (void *)0;
+        child->read = cfg_read;
         child->write = (void *)0;
         child->readdir = (void *)0;
         return 0;

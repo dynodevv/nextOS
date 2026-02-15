@@ -33,8 +33,7 @@ void settings_save_to_disk(void)
 {
     disk_device_t *disk = disk_get_primary();
     if (!disk) return;
-    settings_disk_t cfg;
-    for (int i = 0; i < (int)sizeof(cfg); i++) ((uint8_t *)&cfg)[i] = 0;
+    settings_disk_t cfg = {0};
     cfg.magic = SETTINGS_MAGIC;
     cfg.theme = (uint32_t)compositor_get_theme();
     cfg.kb_layout = (uint32_t)keyboard_get_layout();
