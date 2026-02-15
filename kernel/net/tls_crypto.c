@@ -546,14 +546,19 @@ static int bn_cmp(const bignum_t *a, const bignum_t *b)
 /* a = a - b (assumes a >= b) */
 static void bn_sub(bignum_t *a, const bignum_t *b)
 {
-    uint64_t borrow = 0;
+    int borrow = 0;
     int n = a->n > b->n ? a->n : b->n;
     for (int i = 0; i < n; i++) {
         uint64_t av = (i < a->n) ? a->d[i] : 0;
         uint64_t bv = (i < b->n) ? b->d[i] : 0;
-        uint64_t diff = av - bv - borrow;
-        a->d[i] = (uint32_t)diff;
-        borrow = (diff >> 63) & 1;
+        bv += borrow;
+        if (av >= bv) {
+            a->d[i] = (uint32_t)(av - bv);
+            borrow = 0;
+        } else {
+            a->d[i] = (uint32_t)((0x100000000ULL + av) - bv);
+            borrow = 1;
+        }
     }
     if (n > a->n) a->n = n;
     while (a->n > 0 && a->d[a->n - 1] == 0) a->n--;
@@ -670,14 +675,23 @@ int rsa_pkcs1_encrypt(const rsa_pubkey_t *key,
 }
 
 /* ── PRNG ────────────────────────────────────────────────────────────── */
-static uint32_t prng_state = 0x5A5A5A5A;
-
 uint32_t tls_random(void)
 {
-    prng_state ^= (uint32_t)timer_get_ticks();
-    prng_state = prng_state * 1103515245 + 12345;
-    prng_state ^= prng_state >> 16;
-    return prng_state;
+    static uint32_t s0 = 0x5A5A5A5A;
+    static uint32_t s1 = 0xA5A5A5A5;
+    static int seeded = 0;
+    if (!seeded) {
+        s0 ^= (uint32_t)timer_get_ticks();
+        s1 ^= (uint32_t)(timer_get_ticks() >> 16) ^ 0xDEADBEEF;
+        seeded = 1;
+    }
+    /* xorshift64 style with timer entropy mixing */
+    s0 ^= s0 << 13;
+    s0 ^= s0 >> 17;
+    s0 ^= s0 << 5;
+    s1 ^= (uint32_t)timer_get_ticks();
+    s1 = s1 * 1103515245 + 12345;
+    return s0 + s1;
 }
 
 void tls_random_bytes(uint8_t *buf, int len)

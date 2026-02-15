@@ -1091,22 +1091,45 @@ static void tls_compute_mac(const uint8_t *mac_key,
                             const uint8_t *data, int data_len,
                             uint8_t mac_out[32])
 {
-    /* MAC input: seq_num(8) + type(1) + version(2) + length(2) + data */
-    uint8_t mac_input[13 + 16384];
-    int mi = 0;
-    /* Sequence number (8 bytes big-endian) */
+    /* MAC input: seq_num(8) + type(1) + version(2) + length(2) + data
+     * Use HMAC incrementally to avoid large stack buffer */
+    uint8_t header[13];
+    int hi = 0;
     for (int i = 7; i >= 0; i--)
-        mac_input[mi++] = (seq_num >> (i * 8)) & 0xFF;
-    mac_input[mi++] = rec_type;
-    mac_input[mi++] = TLS_VER_MAJOR;
-    mac_input[mi++] = TLS_VER_MINOR;
-    mac_input[mi++] = (uint8_t)(data_len >> 8);
-    mac_input[mi++] = (uint8_t)(data_len & 0xFF);
-    if (data_len <= 16384) {
-        mem_copy(mac_input + mi, data, data_len);
-        mi += data_len;
-    }
-    hmac_sha256(mac_key, 32, mac_input, mi, mac_out);
+        header[hi++] = (seq_num >> (i * 8)) & 0xFF;
+    header[hi++] = rec_type;
+    header[hi++] = TLS_VER_MAJOR;
+    header[hi++] = TLS_VER_MINOR;
+    header[hi++] = (uint8_t)(data_len >> 8);
+    header[hi++] = (uint8_t)(data_len & 0xFF);
+
+    /* HMAC-SHA-256 over header + data */
+    uint8_t k_pad[64];
+    sha256_ctx_t ctx;
+    const uint8_t *key = mac_key;
+    int key_len = 32;
+
+    /* ipad */
+    mem_zero(k_pad, 64);
+    mem_copy(k_pad, key, key_len);
+    for (int i = 0; i < 64; i++) k_pad[i] ^= 0x36;
+
+    sha256_init(&ctx);
+    sha256_update(&ctx, k_pad, 64);
+    sha256_update(&ctx, header, 13);
+    sha256_update(&ctx, data, data_len);
+    uint8_t inner[32];
+    sha256_final(&ctx, inner);
+
+    /* opad */
+    mem_zero(k_pad, 64);
+    mem_copy(k_pad, key, key_len);
+    for (int i = 0; i < 64; i++) k_pad[i] ^= 0x5c;
+
+    sha256_init(&ctx);
+    sha256_update(&ctx, k_pad, 64);
+    sha256_update(&ctx, inner, 32);
+    sha256_final(&ctx, mac_out);
 }
 
 /* Send encrypted TLS record */

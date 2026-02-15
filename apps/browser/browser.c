@@ -320,7 +320,6 @@ static uint32_t named_color(const char *name)
     if (str_ncasecmp(name, "coral", 5) == 0) return 0xFF7F50;
     if (str_ncasecmp(name, "crimson", 7) == 0) return 0xDC143C;
     if (str_ncasecmp(name, "darkblue", 8) == 0) return 0x00008B;
-    if (str_ncasecmp(name, "darkgreen", 9) == 0) return 0x006400;
     if (str_ncasecmp(name, "darkred", 7) == 0) return 0x8B0000;
     if (str_ncasecmp(name, "gold", 4) == 0) return 0xFFD700;
     if (str_ncasecmp(name, "indigo", 6) == 0) return 0x4B0082;
@@ -333,8 +332,11 @@ static uint32_t named_color(const char *name)
     if (str_ncasecmp(name, "tomato", 6) == 0) return 0xFF6347;
     if (str_ncasecmp(name, "violet", 6) == 0) return 0xEE82EE;
     if (str_ncasecmp(name, "wheat", 5) == 0) return 0xF5DEB3;
-    if (str_ncasecmp(name, "lightgr", 7) == 0) return 0xD3D3D3;
-    if (str_ncasecmp(name, "darkgr", 6) == 0) return 0xA9A9A9;
+    if (str_ncasecmp(name, "lightgray", 9) == 0 || str_ncasecmp(name, "lightgrey", 9) == 0) return 0xD3D3D3;
+    if (str_ncasecmp(name, "lightgreen", 10) == 0) return 0x90EE90;
+    if (str_ncasecmp(name, "lightblue", 9) == 0) return 0xADD8E6;
+    if (str_ncasecmp(name, "darkgray", 8) == 0 || str_ncasecmp(name, "darkgrey", 8) == 0) return 0xA9A9A9;
+    if (str_ncasecmp(name, "darkgreen", 9) == 0) return 0x006400;
     if (name[0] == '#') return parse_html_color(name);
     return 0xFFFFFF;
 }
