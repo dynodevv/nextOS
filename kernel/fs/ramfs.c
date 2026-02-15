@@ -6,13 +6,40 @@
  * disk-based ext2 filesystem. User directories and their contents live
  * in kernel heap memory. Paths starting with /Desktop/, /Documents/,
  * /Images/ are handled by ramfs; all other paths fall through to ext2.
+ *
+ * Persistence: ramfs entries are serialized to raw disk sectors starting
+ * at RAMFS_PERSIST_LBA so data survives reboots.
  */
 #include "ramfs.h"
 #include "../mem/heap.h"
+#include "../drivers/disk.h"
 
 #define RAMFS_MAX_FILES   128
 #define RAMFS_MAX_DATA    8192
 #define RAMFS_NAME_MAX    VFS_MAX_NAME
+
+/* Disk persistence: ramfs data is stored at sectors starting at this LBA */
+#define RAMFS_PERSIST_LBA    8192  /* 4MB offset, well past ext2 partition */
+#define RAMFS_PERSIST_MAGIC  0x524D4653  /* "RMFS" */
+
+/* On-disk header: magic + count, padded to 512 bytes */
+typedef struct {
+    uint32_t magic;
+    uint32_t count;
+    uint8_t  reserved[504];
+} __attribute__((packed)) ramfs_disk_header_t;
+
+/* On-disk entry metadata, padded to 512 bytes */
+typedef struct {
+    char              name[128];
+    char              parent[256];
+    uint32_t          type;     /* VFS_FILE or VFS_DIRECTORY */
+    uint32_t          size;
+    uint8_t           reserved[120];
+} __attribute__((packed)) ramfs_disk_entry_t;
+
+static void ramfs_sync_to_disk(void);
+static void ramfs_load_from_disk(void);
 
 typedef struct {
     char              name[RAMFS_NAME_MAX];
@@ -93,6 +120,9 @@ void ramfs_init(void)
         entries[entry_count].used = 1;
         entry_count++;
     }
+
+    /* Try to load persisted entries from disk */
+    ramfs_load_from_disk();
 }
 
 /* Find entry by parent path and name */
@@ -196,6 +226,7 @@ int ramfs_write(vfs_node_t *node, uint64_t offset, uint64_t size, const void *bu
     if (offset + size > entries[idx].size)
         entries[idx].size = offset + size;
 
+    ramfs_sync_to_disk();
     return (int)size;
 }
 
@@ -316,6 +347,7 @@ int ramfs_create(const char *path, vfs_node_type_t type)
     entries[slot].used = 1;
     entry_count++;
 
+    ramfs_sync_to_disk();
     return 0;
 }
 
@@ -344,6 +376,7 @@ int ramfs_delete(const char *path)
     entries[idx].used = 0;
     entry_count--;
 
+    ramfs_sync_to_disk();
     return 0;
 }
 
@@ -362,5 +395,163 @@ int ramfs_rename(const char *old_path, const char *new_path)
     ramfs_strcpy(entries[idx].name, new_name);
     ramfs_strcpy(entries[idx].parent, new_parent);
 
+    ramfs_sync_to_disk();
     return 0;
+}
+
+/* ── Disk persistence ─────────────────────────────────────────────────── */
+
+/*
+ * On-disk layout starting at RAMFS_PERSIST_LBA:
+ *   Sector 0: ramfs_disk_header_t (magic, entry count)
+ *   For each entry:
+ *     1 sector:  ramfs_disk_entry_t (metadata)
+ *     N sectors: file data (size / 512 rounded up)
+ */
+
+static void ramfs_sync_to_disk(void)
+{
+    disk_device_t *disk = disk_get_primary();
+    if (!disk) return;
+
+    uint8_t sector[512];
+    uint64_t lba = RAMFS_PERSIST_LBA;
+
+    /* Write header */
+    for (int i = 0; i < 512; i++) sector[i] = 0;
+    ramfs_disk_header_t *hdr = (ramfs_disk_header_t *)sector;
+    hdr->magic = RAMFS_PERSIST_MAGIC;
+
+    /* Count user entries (skip built-in directories) */
+    int user_count = 0;
+    for (int i = 0; i < RAMFS_MAX_FILES; i++) {
+        if (!entries[i].used) continue;
+        /* Skip built-in dirs (parent="/" and name matches builtin) */
+        if (ramfs_strcmp(entries[i].parent, "/") == 0) {
+            int is_builtin = 0;
+            for (int b = 0; b < BUILTIN_DIR_COUNT; b++) {
+                if (ramfs_strcmp(entries[i].name, builtin_dirs[b]) == 0) {
+                    is_builtin = 1;
+                    break;
+                }
+            }
+            if (is_builtin) continue;
+        }
+        user_count++;
+    }
+    hdr->count = (uint32_t)user_count;
+    disk_write(disk, lba, 1, sector);
+    lba++;
+
+    /* Write each user entry */
+    for (int i = 0; i < RAMFS_MAX_FILES; i++) {
+        if (!entries[i].used) continue;
+        /* Skip built-in dirs */
+        if (ramfs_strcmp(entries[i].parent, "/") == 0) {
+            int is_builtin = 0;
+            for (int b = 0; b < BUILTIN_DIR_COUNT; b++) {
+                if (ramfs_strcmp(entries[i].name, builtin_dirs[b]) == 0) {
+                    is_builtin = 1;
+                    break;
+                }
+            }
+            if (is_builtin) continue;
+        }
+
+        /* Write metadata sector */
+        for (int j = 0; j < 512; j++) sector[j] = 0;
+        ramfs_disk_entry_t *de = (ramfs_disk_entry_t *)sector;
+        ramfs_strcpy(de->name, entries[i].name);
+        ramfs_strcpy(de->parent, entries[i].parent);
+        de->type = (uint32_t)entries[i].type;
+        de->size = (uint32_t)entries[i].size;
+        disk_write(disk, lba, 1, sector);
+        lba++;
+
+        /* Write data sectors */
+        uint32_t data_sectors = (de->size + 511) / 512;
+        if (entries[i].data && de->size > 0) {
+            for (uint32_t s = 0; s < data_sectors; s++) {
+                for (int j = 0; j < 512; j++) sector[j] = 0;
+                uint32_t offset = s * 512;
+                uint32_t chunk = de->size - offset;
+                if (chunk > 512) chunk = 512;
+                for (uint32_t j = 0; j < chunk; j++)
+                    sector[j] = entries[i].data[offset + j];
+                disk_write(disk, lba + s, 1, sector);
+            }
+        }
+        lba += data_sectors;
+    }
+}
+
+static void ramfs_load_from_disk(void)
+{
+    disk_device_t *disk = disk_get_primary();
+    if (!disk) return;
+
+    uint8_t sector[512];
+    uint64_t lba = RAMFS_PERSIST_LBA;
+
+    /* Read header */
+    if (disk_read(disk, lba, 1, sector) < 0) return;
+    ramfs_disk_header_t *hdr = (ramfs_disk_header_t *)sector;
+    if (hdr->magic != RAMFS_PERSIST_MAGIC) return;
+    uint32_t count = hdr->count;
+    if (count > RAMFS_MAX_FILES - BUILTIN_DIR_COUNT) return;
+    lba++;
+
+    /* Read each entry */
+    for (uint32_t e = 0; e < count; e++) {
+        if (disk_read(disk, lba, 1, sector) < 0) return;
+        ramfs_disk_entry_t *de = (ramfs_disk_entry_t *)sector;
+        lba++;
+
+        /* Find free slot */
+        int slot = -1;
+        for (int i = 0; i < RAMFS_MAX_FILES; i++) {
+            if (!entries[i].used) { slot = i; break; }
+        }
+        if (slot < 0) return;
+
+        /* Check for duplicates (shouldn't happen, but be safe) */
+        if (find_entry(de->parent, de->name) >= 0) {
+            /* Skip duplicate — advance past data sectors */
+            uint32_t data_sectors = (de->size + 511) / 512;
+            lba += data_sectors;
+            continue;
+        }
+
+        ramfs_strcpy(entries[slot].name, de->name);
+        ramfs_strcpy(entries[slot].parent, de->parent);
+        entries[slot].type = (vfs_node_type_t)de->type;
+        entries[slot].size = de->size;
+        entries[slot].used = 1;
+        entry_count++;
+
+        /* Read data */
+        uint32_t data_sectors = (de->size + 511) / 512;
+        if (de->size > 0) {
+            entries[slot].data = (uint8_t *)kmalloc(de->size + 512);
+            entries[slot].capacity = de->size + 512;
+            if (!entries[slot].data) {
+                entries[slot].size = 0;
+                entries[slot].capacity = 0;
+                lba += data_sectors;
+                continue;
+            }
+            for (uint32_t s = 0; s < data_sectors; s++) {
+                if (disk_read(disk, lba + s, 1, sector) < 0) break;
+                uint32_t offset = s * 512;
+                uint32_t chunk = de->size - offset;
+                if (chunk > 512) chunk = 512;
+                for (uint32_t j = 0; j < chunk; j++)
+                    entries[slot].data[offset + j] = sector[j];
+            }
+        } else {
+            entries[slot].data = (void *)0;
+            entries[slot].capacity = 0;
+        }
+        lba += data_sectors;
+    }
 }

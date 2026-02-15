@@ -338,6 +338,8 @@ static void handle_installer_input(void)
         int bw = 200, bh = 44;
         int bx = px + (pw - bw) / 2, by = py + 180;
         if (ms.x >= bx && ms.x < bx + bw && ms.y >= by && ms.y < by + bh) {
+            /* Re-initialize VFS to detect newly installed ext2 filesystem */
+            vfs_init();
             installer_active = 0;
         }
     }
