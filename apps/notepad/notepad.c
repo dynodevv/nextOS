@@ -690,3 +690,28 @@ void notepad_launch(void)
     notepad_win->on_key   = notepad_key;
     notepad_win->on_close = notepad_close;
 }
+
+/* ── Public: open a file in notepad ──────────────────────────────────── */
+void notepad_open_file(const char *path)
+{
+    /* Launch notepad window if not already open */
+    if (!notepad_win || !notepad_win->active) {
+        notepad_win = (void *)0;
+        text_len = 0;
+        cursor_pos = 0;
+        text_buf[0] = 0;
+        file_path[0] = 0;
+        modified = 0;
+        dialog_mode = 0;
+
+        notepad_win = compositor_create_window("Notepad", 200, 100, 500, 400);
+        if (!notepad_win) return;
+        notepad_win->on_paint = notepad_paint;
+        notepad_win->on_mouse = notepad_mouse;
+        notepad_win->on_key   = notepad_key;
+        notepad_win->on_close = notepad_close;
+    }
+
+    /* Load the file using the absolute path */
+    load_file(path);
+}

@@ -468,13 +468,14 @@ static void ramfs_sync_to_disk(void)
         disk_write(disk, lba, 1, sector);
         lba++;
 
-        /* Write data sectors */
-        uint32_t data_sectors = (de->size + 511) / 512;
-        if (entries[i].data && de->size > 0) {
+        /* Write data sectors — save size before clearing sector buffer */
+        uint32_t entry_size = (uint32_t)entries[i].size;
+        uint32_t data_sectors = (entry_size + 511) / 512;
+        if (entries[i].data && entry_size > 0) {
             for (uint32_t s = 0; s < data_sectors; s++) {
                 for (int j = 0; j < 512; j++) sector[j] = 0;
                 uint32_t offset = s * 512;
-                uint32_t chunk = de->size - offset;
+                uint32_t chunk = entry_size - offset;
                 if (chunk > 512) chunk = 512;
                 for (uint32_t j = 0; j < chunk; j++)
                     sector[j] = entries[i].data[offset + j];

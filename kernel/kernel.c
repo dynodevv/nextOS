@@ -674,6 +674,9 @@ void kernel_main(uint64_t mb_info_addr)
     /* 7. Compositor */
     compositor_init();
 
+    /* 8. Load saved settings (theme, keyboard, mouse speed) */
+    settings_load_from_disk();
+
     /* Register app launcher for start menu and desktop icon clicks */
     compositor_set_app_launcher(launch_app_by_index);
 

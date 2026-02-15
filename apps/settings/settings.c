@@ -14,7 +14,48 @@
 #include "kernel/gfx/framebuffer.h"
 #include "kernel/drivers/keyboard.h"
 #include "kernel/drivers/mouse.h"
+#include "kernel/drivers/disk.h"
 #include "kernel/mem/heap.h"
+
+/* ── Settings persistence ────────────────────────────────────────────── */
+#define SETTINGS_LBA   8000
+#define SETTINGS_MAGIC 0x43464731  /* "CFG1" */
+
+typedef struct {
+    uint32_t magic;
+    uint32_t theme;
+    uint32_t kb_layout;
+    uint32_t mouse_speed;
+    uint8_t  reserved[512 - 16];
+} __attribute__((packed)) settings_disk_t;
+
+void settings_save_to_disk(void)
+{
+    disk_device_t *disk = disk_get_primary();
+    if (!disk) return;
+    settings_disk_t cfg;
+    for (int i = 0; i < (int)sizeof(cfg); i++) ((uint8_t *)&cfg)[i] = 0;
+    cfg.magic = SETTINGS_MAGIC;
+    cfg.theme = (uint32_t)compositor_get_theme();
+    cfg.kb_layout = (uint32_t)keyboard_get_layout();
+    cfg.mouse_speed = (uint32_t)mouse_get_speed();
+    disk_write(disk, SETTINGS_LBA, 1, &cfg);
+}
+
+void settings_load_from_disk(void)
+{
+    disk_device_t *disk = disk_get_primary();
+    if (!disk) return;
+    settings_disk_t cfg;
+    if (disk_read(disk, SETTINGS_LBA, 1, &cfg) < 0) return;
+    if (cfg.magic != SETTINGS_MAGIC) return;
+    if (cfg.theme < THEME_COUNT)
+        compositor_set_theme((theme_t)cfg.theme);
+    if (cfg.kb_layout < KB_LAYOUT_COUNT)
+        keyboard_set_layout((kb_layout_t)cfg.kb_layout);
+    if (cfg.mouse_speed >= 1 && cfg.mouse_speed <= 10)
+        mouse_set_speed((int)cfg.mouse_speed);
+}
 
 /* ── Tab identifiers ──────────────────────────────────────────────────── */
 typedef enum { TAB_DISPLAY = 0, TAB_THEME, TAB_KEYBOARD, TAB_MOUSE, TAB_COUNT } tab_t;
@@ -401,6 +442,7 @@ static void settings_mouse(window_t *win, int mx, int my, int buttons)
             if (mx >= 20 && mx < 260 && my >= by && my < by + 32) {
                 theme_index = i;
                 compositor_set_theme((theme_t)i);
+                settings_save_to_disk();
                 return;
             }
         }
@@ -446,6 +488,7 @@ static void settings_mouse(window_t *win, int mx, int my, int buttons)
             if (mx >= 20 && mx < 300 && my >= by && my < by + 24) {
                 kb_layout_index = li;
                 keyboard_set_layout((kb_layout_t)li);
+                settings_save_to_disk();
                 return;
             }
         }
@@ -459,6 +502,7 @@ static void settings_mouse(window_t *win, int mx, int my, int buttons)
             if (speed < 1) speed = 1;
             if (speed > 10) speed = 10;
             mouse_set_speed(speed);
+            settings_save_to_disk();
             return;
         }
         /* Preset buttons */
@@ -467,6 +511,7 @@ static void settings_mouse(window_t *win, int mx, int my, int buttons)
             int by = 140 + i * 36;
             if (mx >= 20 && mx < 160 && my >= by && my < by + 28) {
                 mouse_set_speed(speed_vals[i]);
+                settings_save_to_disk();
                 return;
             }
         }

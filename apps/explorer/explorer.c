@@ -10,6 +10,7 @@
 #include "kernel/gfx/framebuffer.h"
 #include "kernel/fs/vfs.h"
 #include "kernel/mem/heap.h"
+#include "apps/notepad/notepad.h"
 
 /* ── State ────────────────────────────────────────────────────────────── */
 #define MAX_ENTRIES  128
@@ -246,9 +247,9 @@ static int is_system_entry(int idx)
     if (current_path[0] == '/' && current_path[1] == 0) {
         const char *name = entries[idx].name;
         const char *sys_names[] = {
-            "boot", "grub", "kernel", "lost+found",
+            "boot", "grub", "kernel", "lost+found", "nextos.cfg",
         };
-        for (int i = 0; i < 4; i++) {
+        for (int i = 0; i < 5; i++) {
             const char *s = sys_names[i];
             const char *n = name;
             int match = 1;
@@ -777,12 +778,24 @@ static void explorer_mouse(window_t *win, int mx, int my, int buttons)
         int vi = (my - list_y) / ENTRY_HEIGHT;
         int ei = scroll_offset + vi;
         if (ei < entry_count) {
-            if (ei == selected_index && entries[ei].type == VFS_DIRECTORY) {
-                /* Double-click simulation: navigate into directory */
-                str_cat(current_path, entries[ei].name);
-                str_cat(current_path, "/");
-                current_dir = entries[ei];
-                refresh_listing();
+            if (ei == selected_index) {
+                if (entries[ei].type == VFS_DIRECTORY) {
+                    /* Double-click on directory: navigate into it */
+                    str_cat(current_path, entries[ei].name);
+                    str_cat(current_path, "/");
+                    current_dir = entries[ei];
+                    refresh_listing();
+                } else {
+                    /* Double-click on file: open in notepad */
+                    char fpath[PATH_MAX_LEN];
+                    int k = 0;
+                    const char *cp = current_path;
+                    while (*cp && k < PATH_MAX_LEN - 1) fpath[k++] = *cp++;
+                    const char *fn = entries[ei].name;
+                    while (*fn && k < PATH_MAX_LEN - 1) fpath[k++] = *fn++;
+                    fpath[k] = 0;
+                    notepad_open_file(fpath);
+                }
             } else {
                 selected_index = ei;
             }

@@ -227,11 +227,27 @@ static int vfs_root_readdir(vfs_node_t *dir, int index, vfs_node_t *child)
         /* Skip entries that overlap with ramfs names */
         if (is_ramfs_builtin(disk_child.name)) continue;
 
+        /* Skip nextos.cfg if it somehow exists on disk (we show our virtual one) */
+        if (vfs_strcmp(disk_child.name, "nextos.cfg") == 0) continue;
+
         if (disk_scan == disk_idx) {
             *child = disk_child;
             return 0;
         }
         disk_scan++;
+    }
+
+    /* After all disk entries, add the virtual nextos.cfg file */
+    if (disk_scan == disk_idx) {
+        vfs_strcpy(child->name, "nextos.cfg");
+        child->type = VFS_FILE;
+        child->size = 0;
+        child->inode = 0;
+        child->fs_data = 0;
+        child->read = (void *)0;
+        child->write = (void *)0;
+        child->readdir = (void *)0;
+        return 0;
     }
 
     return -1;
