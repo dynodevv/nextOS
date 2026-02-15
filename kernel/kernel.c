@@ -338,6 +338,8 @@ static void handle_installer_input(void)
         int bw = 200, bh = 44;
         int bx = px + (pw - bw) / 2, by = py + 180;
         if (ms.x >= bx && ms.x < bx + bw && ms.y >= by && ms.y < by + bh) {
+            /* Re-initialize VFS to detect newly installed ext2 filesystem */
+            vfs_init();
             installer_active = 0;
         }
     }
@@ -545,7 +547,7 @@ static void about_paint(window_t *win)
 
     /* Version & info lines */
     const char *lines[] = {
-        "Version 1.0",
+        "Version 2.0.0",
         "",
         "A next-generation",
         "operating system.",
@@ -672,6 +674,9 @@ void kernel_main(uint64_t mb_info_addr)
     /* 7. Compositor */
     compositor_init();
 
+    /* 8. Load saved settings (theme, keyboard, mouse speed) */
+    settings_load_from_disk();
+
     /* Register app launcher for start menu and desktop icon clicks */
     compositor_set_app_launcher(launch_app_by_index);
 
@@ -709,7 +714,7 @@ void kernel_main(uint64_t mb_info_addr)
             fb_swap();
         }
 
-        /* Target ~60 FPS (sleep ~16 ms between frames) */
-        timer_sleep_ms(16);
+        /* Target ~120 FPS for buttery-smooth experience */
+        timer_sleep_ms(8);
     }
 }

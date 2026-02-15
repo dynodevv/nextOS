@@ -19,6 +19,12 @@ static int      prev_mouse_buttons = 0;
 static int      start_menu_open = 0;
 static void   (*start_menu_callback)(int item) = (void *)0;
 
+/* Wallpaper cache to avoid expensive per-frame redraws */
+static uint32_t *wallpaper_cache = (void *)0;
+static int       wallpaper_dirty = 1;
+static theme_t   wallpaper_theme = THEME_BRUSHED_METAL;
+static uint32_t  wallpaper_w = 0, wallpaper_h = 0;
+
 /* ── Theme colour palettes ────────────────────────────────────────────── */
 typedef struct {
     uint32_t titlebar_top;
@@ -28,6 +34,7 @@ typedef struct {
     uint32_t shadow;
     uint32_t taskbar_top;
     uint32_t taskbar_bot;
+    uint32_t taskbar_text;
     uint32_t desktop_top;
     uint32_t desktop_bot;
     uint32_t button_top;
@@ -44,6 +51,7 @@ static const theme_colors_t themes[THEME_COUNT] = {
         .shadow        = 0x303030,
         .taskbar_top   = 0xB0B0B0,
         .taskbar_bot   = 0x707070,
+        .taskbar_text  = 0x1A1A1A,
         .desktop_top   = 0x4A6FA5,
         .desktop_bot   = 0x1B2838,
         .button_top    = 0xD0D0D0,
@@ -53,16 +61,47 @@ static const theme_colors_t themes[THEME_COUNT] = {
     [THEME_GLOSSY_GLASS] = {
         .titlebar_top  = 0xE8F0FF,
         .titlebar_bot  = 0x6090D0,
-        .titlebar_text = 0xFFFFFF,
+        .titlebar_text = 0x1A1A1A,
         .border        = 0x3060A0,
         .shadow        = 0x203050,
         .taskbar_top   = 0xD0E0F8,
         .taskbar_bot   = 0x5080C0,
+        .taskbar_text  = 0x1A1A1A,
         .desktop_top   = 0x2060B0,
         .desktop_bot   = 0x0A1A30,
         .button_top    = 0xC0D8F0,
         .button_bot    = 0x5080B0,
         .close_btn     = 0xE04040,
+    },
+    [THEME_DARK_OBSIDIAN] = {
+        .titlebar_top  = 0x484848,
+        .titlebar_bot  = 0x1E1E1E,
+        .titlebar_text = 0xE0E0E0,
+        .border        = 0x2A2A2A,
+        .shadow        = 0x101010,
+        .taskbar_top   = 0x3A3A3A,
+        .taskbar_bot   = 0x1A1A1A,
+        .taskbar_text  = 0xFFFFFF,
+        .desktop_top   = 0x2A1A30,
+        .desktop_bot   = 0x0A0510,
+        .button_top    = 0x505050,
+        .button_bot    = 0x282828,
+        .close_btn     = 0xD04040,
+    },
+    [THEME_WARM_MAHOGANY] = {
+        .titlebar_top  = 0xB07848,
+        .titlebar_bot  = 0x704020,
+        .titlebar_text = 0xFFF0E0,
+        .border        = 0x503018,
+        .shadow        = 0x281808,
+        .taskbar_top   = 0x986840,
+        .taskbar_bot   = 0x583020,
+        .taskbar_text  = 0xFFFFFF,
+        .desktop_top   = 0x4A6030,
+        .desktop_bot   = 0x1A2810,
+        .button_top    = 0xC08858,
+        .button_bot    = 0x805030,
+        .close_btn     = 0xC84040,
     },
 };
 
@@ -91,6 +130,66 @@ static void draw_gradient_rect(int x, int y, int w, int h,
         uint32_t c = lerp_color(top, bot, row, h);
         for (int col = 0; col < w; col++) {
             fb_putpixel(x + col, y + row, c);
+        }
+    }
+}
+
+/* ── Rounded rectangle helper ─────────────────────────────────────────── */
+/* Returns 1 if (col,row) is inside a rounded rect of size w x h with radius r */
+static int inside_rounded_rect(int col, int row, int w, int h, int r)
+{
+    /* Check corners */
+    if (col < r && row < r) {
+        int dx = r - col - 1, dy = r - row - 1;
+        return (dx * dx + dy * dy) <= (r * r);
+    }
+    if (col >= w - r && row < r) {
+        int dx = col - (w - r), dy = r - row - 1;
+        return (dx * dx + dy * dy) <= (r * r);
+    }
+    if (col < r && row >= h - r) {
+        int dx = r - col - 1, dy = row - (h - r);
+        return (dx * dx + dy * dy) <= (r * r);
+    }
+    if (col >= w - r && row >= h - r) {
+        int dx = col - (w - r), dy = row - (h - r);
+        return (dx * dx + dy * dy) <= (r * r);
+    }
+    return 1;
+}
+
+static void draw_rounded_gradient_rect(int x, int y, int w, int h, int r,
+                                       uint32_t top, uint32_t bot)
+{
+    for (int row = 0; row < h; row++) {
+        uint32_t c = lerp_color(top, bot, row, h);
+        for (int col = 0; col < w; col++) {
+            if (inside_rounded_rect(col, row, w, h, r))
+                fb_putpixel(x + col, y + row, c);
+        }
+    }
+}
+
+static void draw_rounded_rect_outline(int x, int y, int w, int h, int r, uint32_t color)
+{
+    /* Top edge (between corners) */
+    for (int col = r; col < w - r; col++) fb_putpixel(x + col, y, color);
+    /* Bottom edge */
+    for (int col = r; col < w - r; col++) fb_putpixel(x + col, y + h - 1, color);
+    /* Left edge */
+    for (int row = r; row < h - r; row++) fb_putpixel(x, y + row, color);
+    /* Right edge */
+    for (int row = r; row < h - r; row++) fb_putpixel(x + w - 1, y + row, color);
+    /* Corner arcs */
+    for (int dy = 0; dy < r; dy++) {
+        for (int dx = 0; dx < r; dx++) {
+            int d2 = (r - dx - 1) * (r - dx - 1) + (r - dy - 1) * (r - dy - 1);
+            if (d2 >= (r - 1) * (r - 1) && d2 <= r * r) {
+                fb_putpixel(x + dx, y + dy, color);             /* TL */
+                fb_putpixel(x + w - 1 - dx, y + dy, color);    /* TR */
+                fb_putpixel(x + dx, y + h - 1 - dy, color);    /* BL */
+                fb_putpixel(x + w - 1 - dx, y + h - 1 - dy, color); /* BR */
+            }
         }
     }
 }
@@ -159,6 +258,7 @@ static void str_cpy(char *d, const char *s)
 /* ── Draw a single window ─────────────────────────────────────────────── */
 #define TITLEBAR_H 28
 #define BORDER_W   2
+#define WIN_CORNER_R 6  /* Rounded corner radius for windows */
 
 static void draw_titlebar_circle(int cx, int cy, int r, uint32_t color)
 {
@@ -176,14 +276,15 @@ static void draw_window(window_t *win)
 
     const theme_colors_t *tc = &themes[current_theme];
     int x = win->x, y = win->y, w = win->width, h = win->height;
+    int total_h = h + TITLEBAR_H;
 
     /* Drop shadow */
-    draw_shadow(x, y, w, h + TITLEBAR_H, tc->shadow);
+    draw_shadow(x, y, w, total_h, tc->shadow);
 
-    /* Title bar gradient + gloss */
-    draw_gradient_rect(x, y, w, TITLEBAR_H, tc->titlebar_top, tc->titlebar_bot);
+    /* Title bar with rounded top corners */
+    draw_rounded_gradient_rect(x, y, w, TITLEBAR_H, WIN_CORNER_R,
+                               tc->titlebar_top, tc->titlebar_bot);
     draw_gloss(x, y, w, TITLEBAR_H);
-    draw_bevel(x, y, w, TITLEBAR_H, 1);
 
     /* Title text (centred) */
     int text_w = str_len(win->title) * 8;
@@ -213,13 +314,13 @@ static void draw_window(window_t *win)
     for (int i = -3; i <= 3; i++)
         fb_putpixel(min_cx + i, btn_y, 0xFFFFFF);
 
-    /* Client area border */
+    /* Client area */
     int cy = y + TITLEBAR_H;
     fb_fill_rect(x, cy, w, h, 0xF0F0F0);
-    draw_bevel(x, cy, w, h, 0);
 
-    /* Border */
-    fb_draw_rect(x - 1, y - 1, w + 2, h + TITLEBAR_H + 2, tc->border);
+    /* Rounded border for whole window */
+    draw_rounded_rect_outline(x - 1, y - 1, w + 2, total_h + 2,
+                              WIN_CORNER_R, tc->border);
 
     /* Blit client canvas onto the window's client area */
     if (win->canvas) {
@@ -233,13 +334,13 @@ static void draw_window(window_t *win)
         }
     }
 
-    /* Unfocused window dimming overlay */
+    /* Unfocused window dimming overlay (entire window) */
     if (!win->focused) {
-        for (int row = 0; row < h + TITLEBAR_H; row++) {
+        for (int row = 0; row < total_h; row++) {
             for (int col = 0; col < w; col++) {
                 int px = x + col, py = y + row;
                 uint32_t orig = fb_getpixel(px, py);
-                fb_putpixel(px, py, rgba_blend(orig, 0x000000, 40));
+                fb_putpixel(px, py, rgba_blend(orig, 0x000000, 60));
             }
         }
     }
@@ -250,16 +351,46 @@ void desktop_draw_wallpaper(void)
 {
     const theme_colors_t *tc = &themes[current_theme];
     framebuffer_t *f = fb_get();
-    draw_gradient_rect(0, 0, f->width, f->height, tc->desktop_top, tc->desktop_bot);
 
-    /* Subtle diagonal texture lines (skeuomorphic detail) */
-    for (int y = 0; y < (int)f->height; y += 6) {
-        for (int x = 0; x < (int)f->width; x++) {
-            if ((x + y) % 12 == 0) {
-                uint32_t px = fb_getpixel(x, y);
-                fb_putpixel(x, y, rgba_blend(px, 0xFFFFFF, 8));
+    /* Rebuild cache if theme changed or first render */
+    if (wallpaper_dirty || wallpaper_theme != current_theme ||
+        wallpaper_w != f->width || wallpaper_h != f->height) {
+        if (wallpaper_cache) {
+            kfree(wallpaper_cache);
+            wallpaper_cache = (void *)0;
+            wallpaper_w = 0;
+            wallpaper_h = 0;
+        }
+        wallpaper_cache = (uint32_t *)kmalloc(f->width * f->height * 4);
+        if (wallpaper_cache) {
+            wallpaper_w = f->width;
+            wallpaper_h = f->height;
+            for (uint32_t y = 0; y < wallpaper_h; y++) {
+                uint32_t c = lerp_color(tc->desktop_top, tc->desktop_bot, (int)y, (int)wallpaper_h);
+                for (uint32_t x = 0; x < wallpaper_w; x++) {
+                    wallpaper_cache[y * wallpaper_w + x] = c;
+                }
+            }
+            /* Subtle diagonal texture lines */
+            for (uint32_t y = 0; y < wallpaper_h; y += 6) {
+                for (uint32_t x = 0; x < wallpaper_w; x++) {
+                    if ((x + y) % 12 == 0) {
+                        uint32_t px = wallpaper_cache[y * wallpaper_w + x];
+                        wallpaper_cache[y * wallpaper_w + x] = rgba_blend(px, 0xFFFFFF, 8);
+                    }
+                }
             }
         }
+        wallpaper_theme = current_theme;
+        wallpaper_dirty = 0;
+    }
+
+    /* Fast blit cached wallpaper */
+    if (wallpaper_cache) {
+        fb_blit(0, 0, (int)wallpaper_w, (int)wallpaper_h, wallpaper_cache);
+    } else {
+        /* Fallback: direct draw */
+        draw_gradient_rect(0, 0, f->width, f->height, tc->desktop_top, tc->desktop_bot);
     }
 }
 
@@ -293,25 +424,36 @@ static void draw_desktop_icon(int x, int y, const desktop_icon_t *icon, int sele
                      rgba_blend(0x4080C0, 0x000000, 80));
     }
 
-    /* Icon shadow */
-    fb_fill_rect(x + 3, y + 3, ICON_W, ICON_H, rgba_blend(0x000000, 0x000000, 60));
+    /* Icon shadow (rounded) */
+    for (int r = 0; r < ICON_H; r++) {
+        for (int col = 0; col < ICON_W; col++) {
+            if (inside_rounded_rect(col, r, ICON_W, ICON_H, 8))
+                fb_putpixel(x + col + 3, y + r + 3, rgba_blend(0x000000, 0x000000, 60));
+        }
+    }
 
-    /* Icon body (gradient square) */
+    /* Icon body (rounded gradient) */
+    #define ICON_R 8
     for (int r = 0; r < ICON_H; r++) {
         uint32_t c = lerp_color(icon->color, rgba_blend(icon->color, 0x000000, 80), r, ICON_H);
-        for (int col = 0; col < ICON_W; col++)
-            fb_putpixel(x + col, y + r, c);
+        for (int col = 0; col < ICON_W; col++) {
+            if (inside_rounded_rect(col, r, ICON_W, ICON_H, ICON_R))
+                fb_putpixel(x + col, y + r, c);
+        }
     }
     /* Gloss highlight on top half */
     for (int r = 0; r < ICON_H / 2; r++) {
         uint8_t alpha = 70 - (uint8_t)(r * 70 / (ICON_H / 2));
         for (int col = 0; col < ICON_W; col++) {
-            uint32_t px = fb_getpixel(x + col, y + r);
-            fb_putpixel(x + col, y + r, rgba_blend(px, 0xFFFFFF, alpha));
+            if (inside_rounded_rect(col, r, ICON_W, ICON_H, ICON_R)) {
+                uint32_t px = fb_getpixel(x + col, y + r);
+                fb_putpixel(x + col, y + r, rgba_blend(px, 0xFFFFFF, alpha));
+            }
         }
     }
-    /* Border */
-    fb_draw_rect(x, y, ICON_W, ICON_H, 0x303030);
+    /* Rounded border */
+    draw_rounded_rect_outline(x, y, ICON_W, ICON_H, ICON_R, 0x303030);
+    #undef ICON_R
 
     /* Draw icon-specific pixel art glyph */
     int cx = x + ICON_W / 2;
@@ -446,7 +588,7 @@ static void draw_start_menu(void)
     for (int i = 0; i < START_MENU_ITEMS; i++) {
         int iy = my + 4 + i * START_MENU_ITEM_H;
         if (i >= 3) iy += separator_h;  /* offset items after separator */
-        fb_draw_string(mx + 12, iy + 8, start_menu_labels[i], 0x1A1A1A, 0x00000000);
+        fb_draw_string(mx + 12, iy + 8, start_menu_labels[i], tc->taskbar_text, 0x00000000);
         /* Separator line between items (but not after last) */
         if (i < START_MENU_ITEMS - 1 && i != 2) {
             for (int sx = mx + 4; sx < mx + START_MENU_W - 4; sx++)
@@ -500,7 +642,7 @@ void desktop_draw_taskbar(void)
             fb_putpixel(lx + 3 + c, ly + r, lc);
         }
     }
-    fb_draw_string(26, y + 12, "nextOS", 0x1A1A1A, 0x00000000);
+    fb_draw_string(26, y + 12, "nextOS", tc->taskbar_text, 0x00000000);
 
     /* Window buttons on taskbar */
     int bx = 110;
@@ -510,7 +652,7 @@ void desktop_draw_taskbar(void)
                            tc->button_top, tc->button_bot);
         draw_bevel(bx, y + 4, 120, TASKBAR_H - 8,
                    windows[i].focused ? 0 : 1);
-        fb_draw_string(bx + 8, y + 12, windows[i].title, 0x1A1A1A, 0x00000000);
+        fb_draw_string(bx + 8, y + 12, windows[i].title, tc->taskbar_text, 0x00000000);
         bx += 128;
     }
 }
@@ -573,8 +715,10 @@ void compositor_init(void)
 
 void compositor_set_theme(theme_t theme)
 {
-    if (theme < THEME_COUNT)
+    if (theme < THEME_COUNT) {
         current_theme = theme;
+        wallpaper_dirty = 1;
+    }
 }
 
 theme_t compositor_get_theme(void)
@@ -705,6 +849,7 @@ static void resize_canvas(window_t *w, int new_w, int new_h)
 void compositor_handle_mouse(int mx, int my, int buttons)
 {
     int click = (buttons & 1) && !(prev_mouse_buttons & 1);
+    int right_click = (buttons & 2) && !(prev_mouse_buttons & 2);
     int release = !(buttons & 1) && (prev_mouse_buttons & 1);
     prev_mouse_buttons = buttons;
 
@@ -881,6 +1026,22 @@ void compositor_handle_mouse(int mx, int my, int buttons)
                 compositor_draw_cursor(mx, my);
                 return;
             }
+        }
+    }
+
+    /* Right-click: forward to window under cursor */
+    if (right_click) {
+        window_t *w = window_at(mx, my);
+        if (w && my >= w->y + TITLEBAR_H && w->on_mouse) {
+            /* Focus the window */
+            for (int j = 0; j < MAX_WINDOWS; j++)
+                windows[j].focused = 0;
+            w->focused = 1;
+            int lx = mx - w->x - BORDER_W;
+            int ly = my - w->y - TITLEBAR_H - BORDER_W;
+            w->on_mouse(w, lx, ly, buttons);
+            compositor_draw_cursor(mx, my);
+            return;
         }
     }
 

@@ -33,7 +33,10 @@ typedef struct {
     uint32_t s_rev_level;
     uint16_t s_def_resuid;
     uint16_t s_def_resgid;
-    /* ... extended fields omitted for brevity ... */
+    /* Rev1 extended fields */
+    uint32_t s_first_ino;
+    uint16_t s_inode_size;
+    /* ... remaining fields omitted for brevity ... */
 } __attribute__((packed)) ext2_superblock_t;
 
 /* ── Block Group Descriptor ──────────────────────────────────────────── */
@@ -133,16 +136,44 @@ static int read_inode(uint32_t inode_num, ext2_inode_t *out)
     return 0;
 }
 
-int ext2_init(void)
+/* MBR partition entry (16 bytes each, 4 entries at offset 446) */
+typedef struct {
+    uint8_t  status;
+    uint8_t  chs_start[3];
+    uint8_t  type;
+    uint8_t  chs_end[3];
+    uint32_t lba_start;
+    uint32_t sector_count;
+} __attribute__((packed)) mbr_part_entry_t;
+
+#define MBR_PART_TYPE_LINUX 0x83
+
+/* Scan MBR partition table for a Linux (0x83) partition */
+static uint32_t find_ext2_partition(void)
 {
-    disk = disk_get_primary();
-    if (!disk) return -1;
+    uint8_t mbr[512];
+    if (disk_read(disk, 0, 1, mbr) < 0) return 0;
 
-    /* EXT2 superblock is at byte offset 1024 (sector 2 for 512-byte sectors) */
-    part_start_lba = 0;
+    /* Check MBR signature */
+    if (mbr[510] != 0x55 || mbr[511] != 0xAA) return 0;
 
+    mbr_part_entry_t *parts = (mbr_part_entry_t *)(mbr + 446);
+    for (int i = 0; i < 4; i++) {
+        if (parts[i].type == MBR_PART_TYPE_LINUX && parts[i].lba_start > 0) {
+            return parts[i].lba_start;
+        }
+    }
+    return 0;
+}
+
+static int try_ext2_at(uint32_t start_lba)
+{
+    part_start_lba = start_lba;
+
+    /* EXT2 superblock is at byte offset 1024 within the partition
+     * For 1024-byte blocks, that's block 1 = sectors 2-3 from partition start */
     uint8_t sb_buf[1024];
-    if (disk_read(disk, 2, 2, sb_buf) < 0) return -1;
+    if (disk_read(disk, start_lba + 2, 2, sb_buf) < 0) return -1;
 
     uint8_t *src = sb_buf;
     uint8_t *dst = (uint8_t *)&sb;
@@ -151,10 +182,31 @@ int ext2_init(void)
     if (sb.s_magic != EXT2_MAGIC) return -1;
 
     block_size = 1024U << sb.s_log_block_size;
-    inode_size = 128;  /* Standard inode size for rev0 and rev1 */
+
+    /* Read inode size: rev0 uses 128, rev1+ stores it in superblock */
+    if (sb.s_rev_level >= 1 && sb.s_inode_size > 0) {
+        inode_size = sb.s_inode_size;
+    } else {
+        inode_size = 128;
+    }
 
     block_buf = kmalloc(block_size);
     return block_buf ? 0 : -1;
+}
+
+int ext2_init(void)
+{
+    disk = disk_get_primary();
+    if (!disk) return -1;
+
+    /* First, scan MBR for a Linux partition */
+    uint32_t part_lba = find_ext2_partition();
+    if (part_lba > 0) {
+        if (try_ext2_at(part_lba) == 0) return 0;
+    }
+
+    /* Fallback: try raw disk (partition starts at sector 0) */
+    return try_ext2_at(0);
 }
 
 int ext2_read(vfs_node_t *node, uint64_t offset, uint64_t size, void *buf)

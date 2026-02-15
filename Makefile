@@ -38,6 +38,7 @@ C_SRCS  := kernel/kernel.c \
            kernel/fs/vfs.c \
            kernel/fs/fat32.c \
            kernel/fs/ext2.c \
+           kernel/fs/ramfs.c \
            kernel/ui/compositor.c \
            apps/settings/settings.c \
            apps/explorer/explorer.c \

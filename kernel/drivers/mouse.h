@@ -16,5 +16,7 @@ typedef struct {
 void         mouse_init(void);
 mouse_state_t mouse_get_state(void);
 void         mouse_set_bounds(int max_x, int max_y);
+void         mouse_set_speed(int speed);  /* 1-10, default 5 */
+int          mouse_get_speed(void);
 
 #endif /* NEXTOS_MOUSE_H */

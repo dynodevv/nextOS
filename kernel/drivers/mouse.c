@@ -8,6 +8,7 @@
 static mouse_state_t state = {0, 0, 0, 0, 0};
 static int max_x = 1024;
 static int max_y = 768;
+static int mouse_speed = 5;  /* 1-10, default 5 */
 
 static uint8_t mouse_cycle = 0;
 static int8_t  mouse_bytes[3];
@@ -55,8 +56,8 @@ static void mouse_irq(uint64_t irq, uint64_t err)
         mouse_cycle = 0;
 
         state.buttons = mouse_bytes[0] & 0x07;
-        state.dx = mouse_bytes[1];
-        state.dy = -mouse_bytes[2]; /* invert Y for screen coords */
+        state.dx = (int)mouse_bytes[1] * mouse_speed / 5;
+        state.dy = (-(int)mouse_bytes[2]) * mouse_speed / 5;
 
         state.x += state.dx;
         state.y += state.dy;
@@ -88,6 +89,9 @@ void mouse_init(void)
 
     /* Use default settings and enable streaming */
     mouse_write(0xF6); mouse_wait_read(); inb(0x60);
+    /* Set sample rate to 200 for smoother tracking */
+    mouse_write(0xF3); mouse_wait_read(); inb(0x60);
+    mouse_write(200);  mouse_wait_read(); inb(0x60);
     mouse_write(0xF4); mouse_wait_read(); inb(0x60);
 
     irq_register_handler(44, mouse_irq);  /* IRQ12 -> vector 44 */
@@ -102,4 +106,16 @@ void mouse_set_bounds(int mx, int my)
 {
     max_x = mx;
     max_y = my;
+}
+
+void mouse_set_speed(int speed)
+{
+    if (speed < 1) speed = 1;
+    if (speed > 10) speed = 10;
+    mouse_speed = speed;
+}
+
+int mouse_get_speed(void)
+{
+    return mouse_speed;
 }

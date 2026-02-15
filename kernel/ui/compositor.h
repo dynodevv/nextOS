@@ -11,6 +11,8 @@
 typedef enum {
     THEME_BRUSHED_METAL = 0,
     THEME_GLOSSY_GLASS,
+    THEME_DARK_OBSIDIAN,
+    THEME_WARM_MAHOGANY,
     THEME_COUNT
 } theme_t;
 

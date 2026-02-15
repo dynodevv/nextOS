@@ -132,6 +132,11 @@ int fat32_init(void)
     /* Validate FAT32 signature */
     if (bpb.bytes_per_sector != 512) return -1;
     if (bpb.fat_size_32 == 0) return -1;
+    if (bpb.sectors_per_cluster == 0) return -1;
+    if (bpb.num_fats == 0) return -1;
+    if (bpb.root_entry_count != 0) return -1;  /* Must be 0 for FAT32 */
+    /* Check boot signature byte (0x28 or 0x29) */
+    if (bpb.boot_sig != 0x28 && bpb.boot_sig != 0x29) return -1;
 
     sectors_per_cluster = bpb.sectors_per_cluster;
     fat_start_lba = bpb.reserved_sectors;

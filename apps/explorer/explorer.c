@@ -10,12 +10,15 @@
 #include "kernel/gfx/framebuffer.h"
 #include "kernel/fs/vfs.h"
 #include "kernel/mem/heap.h"
+#include "apps/notepad/notepad.h"
+#include "kernel/drivers/timer.h"
 
 /* ── State ────────────────────────────────────────────────────────────── */
 #define MAX_ENTRIES  128
 #define ENTRY_HEIGHT 24
 #define VISIBLE_ROWS 12
 #define PATH_MAX_LEN 256
+#define SIDEBAR_W    120
 
 static window_t *explorer_win = (void *)0;
 
@@ -25,6 +28,62 @@ static int         entry_count = 0;
 static int         selected_index = -1;
 static int         scroll_offset = 0;
 static char        current_path[PATH_MAX_LEN] = "/";
+static int         scrollbar_dragging = 0;
+static int         scrollbar_drag_offset = 0;
+
+/* Double-click state for file opening */
+#define DBLCLICK_MS 500
+static int         last_click_index = -1;
+static uint64_t    last_click_tick  = 0;
+static int         prev_buttons     = 0;  /* for edge detection */
+
+/* Context menu state */
+static int         ctx_menu_open = 0;
+static int         ctx_menu_x = 0, ctx_menu_y = 0;
+static int         ctx_menu_target = -1;  /* index of file right-clicked */
+
+/* Clipboard for copy/cut/paste */
+static char        clipboard_path[PATH_MAX_LEN] = "";
+static char        clipboard_name[VFS_MAX_NAME] = "";
+static int         clipboard_cut = 0;  /* 0=copy, 1=cut */
+
+/* Rename dialog state */
+static int         rename_dialog_active = 0;
+static int         rename_target_index = -1;
+static char        rename_input[VFS_MAX_NAME] = "";
+static int         rename_input_len = 0;
+
+/* Sidebar quick-access folders */
+typedef struct { const char *label; const char *path; } sidebar_item_t;
+static const sidebar_item_t sidebar_folders[] = {
+    { "Desktop",    "/Desktop/"    },
+    { "Documents",  "/Documents/"  },
+    { "Images",     "/Images/"     },
+};
+#define SIDEBAR_FOLDER_COUNT 3
+
+/* System-protected paths (cannot rename/delete/modify) */
+static int is_system_path(const char *path)
+{
+    /* Root entries that are system-critical */
+    const char *sys_dirs[] = {
+        "/boot/", "/kernel/", "/grub/", "/boot", "/kernel", "/grub",
+        "/lost+found/", "/lost+found",
+    };
+    for (int i = 0; i < 8; i++) {
+        const char *s = sys_dirs[i];
+        const char *p = path;
+        int match = 1;
+        while (*s) {
+            if (*p != *s) { match = 0; break; }
+            s++; p++;
+        }
+        if (match) return 1;
+    }
+    /* Root directory itself is protected */
+    if (path[0] == '/' && path[1] == 0) return 1;
+    return 0;
+}
 
 /* ── Skeuomorphic colours ─────────────────────────────────────────────── */
 #define COL_CABINET_TOP  0xD4C4A0
@@ -61,11 +120,30 @@ static void canvas_draw_char(uint32_t *canvas, int cw, int ch,
         int py = y + row;
         if (py < 0 || py >= ch) continue;
         uint8_t bits = glyph[row];
+        uint8_t bits_above = (row > 0)  ? glyph[row - 1] : 0;
+        uint8_t bits_below = (row < 15) ? glyph[row + 1] : 0;
         for (int col = 0; col < 8; col++) {
-            if (bits & (0x80 >> col)) {
-                int px = x + col;
-                if (px >= 0 && px < cw)
-                    canvas[py * cw + px] = fg;
+            int px = x + col;
+            if (px < 0 || px >= cw) continue;
+            uint8_t mask = 0x80 >> col;
+            if (bits & mask) {
+                canvas[py * cw + px] = fg;
+            } else {
+                int neighbors = 0;
+                if (bits_above & mask) neighbors++;
+                if (bits_below & mask) neighbors++;
+                if (col > 0 && (bits & (mask << 1))) neighbors++;
+                if (col < 7 && (bits & (mask >> 1))) neighbors++;
+                if (neighbors > 0) {
+                    uint32_t base = canvas[py * cw + px];
+                    uint8_t sr = (fg >> 16) & 0xFF, sg = (fg >> 8) & 0xFF, sb = fg & 0xFF;
+                    uint8_t dr = (base >> 16) & 0xFF, dg = (base >> 8) & 0xFF, db = base & 0xFF;
+                    uint8_t alpha = (uint8_t)(neighbors * 40);
+                    uint8_t rr = (sr * alpha + dr * (255 - alpha)) / 255;
+                    uint8_t rg = (sg * alpha + dg * (255 - alpha)) / 255;
+                    uint8_t rb = (sb * alpha + db * (255 - alpha)) / 255;
+                    canvas[py * cw + px] = ((uint32_t)rr << 16) | ((uint32_t)rg << 8) | (uint32_t)rb;
+                }
             }
         }
     }
@@ -168,6 +246,30 @@ static void draw_file_icon(uint32_t *canvas, int cw, int ch, int x, int y)
     }
 }
 
+/* Check if a specific entry at index is a system file/dir */
+static int is_system_entry(int idx)
+{
+    if (idx < 0 || idx >= entry_count) return 0;
+    /* System files at root level */
+    if (current_path[0] == '/' && current_path[1] == 0) {
+        const char *name = entries[idx].name;
+        const char *sys_names[] = {
+            "boot", "grub", "kernel", "lost+found", "nextos.cfg",
+        };
+        for (int i = 0; i < 5; i++) {
+            const char *s = sys_names[i];
+            const char *n = name;
+            int match = 1;
+            while (*s) {
+                if (*n != *s) { match = 0; break; }
+                s++; n++;
+            }
+            if (match && *n == 0) return 1;
+        }
+    }
+    return is_system_path(current_path);
+}
+
 /* ── Paint callback ───────────────────────────────────────────────────── */
 static void explorer_paint(window_t *win)
 {
@@ -192,9 +294,36 @@ static void explorer_paint(window_t *win)
     fill_rect(win->canvas, cw, ch, 60, 4, cw - 70, 24, COL_PATH_BG);
     canvas_draw_string(win->canvas, cw, ch, 64, 8, current_path, COL_TEXT);
 
-    /* File list area */
+    /* ── Sidebar ─────────────────────────────────────────────────── */
     int list_y = 36;
-    int list_h = ch - list_y - 24;  /* Reserve bottom for status */
+    int list_h = ch - list_y - 24;
+    fill_rect(win->canvas, cw, ch, 0, list_y, SIDEBAR_W, list_h, 0xC8BDA5);
+    /* Sidebar divider */
+    for (int row = list_y; row < list_y + list_h; row++) {
+        if (SIDEBAR_W < cw) win->canvas[row * cw + SIDEBAR_W] = 0x907050;
+    }
+
+    /* Quick-access folders section */
+    canvas_draw_string(win->canvas, cw, ch, 8, list_y + 4, "Favorites", 0x605040);
+    for (int i = 0; i < SIDEBAR_FOLDER_COUNT; i++) {
+        int iy = list_y + 24 + i * 22;
+        draw_folder_icon(win->canvas, cw, ch, 8, iy + 3);
+        canvas_draw_string(win->canvas, cw, ch, 28, iy + 3,
+                           sidebar_folders[i].label, COL_TEXT);
+    }
+
+    /* Separator */
+    int sep_y = list_y + 24 + SIDEBAR_FOLDER_COUNT * 22 + 4;
+    for (int x = 4; x < SIDEBAR_W - 4; x++) {
+        if (sep_y < ch) win->canvas[sep_y * cw + x] = 0xA09080;
+    }
+
+    /* Root directory link */
+    canvas_draw_string(win->canvas, cw, ch, 8, sep_y + 8, "Root (/)", COL_TEXT);
+
+    /* ── File list area (to the right of sidebar) ────────────────── */
+    int file_x = SIDEBAR_W + 2;
+    int file_w = cw - file_x - 14;
 
     for (int vi = 0; vi < VISIBLE_ROWS; vi++) {
         int ei = scroll_offset + vi;
@@ -202,21 +331,26 @@ static void explorer_paint(window_t *win)
 
         int ey = list_y + vi * ENTRY_HEIGHT;
         uint32_t bg = (ei == selected_index) ? COL_SELECTED_BG : 0x00000000;
-        (void)(ei == selected_index ? COL_TEXT_SEL : COL_TEXT); /* fg used by text overlay */
 
-        if (bg) fill_rect(win->canvas, cw, ch, 0, ey, cw - 16, ENTRY_HEIGHT, bg);
+        if (bg) fill_rect(win->canvas, cw, ch, file_x, ey, file_w, ENTRY_HEIGHT, bg);
 
         /* Icon */
         if (entries[ei].type == VFS_DIRECTORY) {
-            draw_folder_icon(win->canvas, cw, ch, 8, ey + 4);
+            draw_folder_icon(win->canvas, cw, ch, file_x + 4, ey + 4);
         } else {
-            draw_file_icon(win->canvas, cw, ch, 8, ey + 5);
+            draw_file_icon(win->canvas, cw, ch, file_x + 4, ey + 5);
         }
 
         /* Name */
         uint32_t text_c = (ei == selected_index) ? COL_TEXT_SEL : COL_TEXT;
-        canvas_draw_string(win->canvas, cw, ch, 28, ey + 4,
+        canvas_draw_string(win->canvas, cw, ch, file_x + 24, ey + 4,
                            entries[ei].name, text_c);
+
+        /* System file indicator (lock icon hint) */
+        if (is_system_entry(ei)) {
+            canvas_draw_string(win->canvas, cw, ch, file_x + file_w - 16, ey + 4,
+                               "*", 0xA04040);
+        }
     }
 
     /* Scrollbar track */
@@ -246,24 +380,354 @@ static void explorer_paint(window_t *win)
     status[si++] = ' '; status[si++] = 'i'; status[si++] = 't';
     status[si++] = 'e'; status[si++] = 'm'; status[si++] = 's'; status[si] = 0;
     canvas_draw_string(win->canvas, cw, ch, 8, sb_y + 2, status, COL_TEXT);
+
+    /* Context menu overlay */
+    if (ctx_menu_open) {
+        #define CTX_MENU_W 100
+        #define CTX_MENU_ITEM_H 22
+        static const char *ctx_labels[] = { "Rename", "Delete", "Copy", "Cut", "Paste" };
+        int ctx_items = (ctx_menu_open == 2) ? 1 : 5;  /* empty-space: Paste only */
+        int cmh = ctx_items * CTX_MENU_ITEM_H + 4;
+        int cmx = ctx_menu_x;
+        int cmy = ctx_menu_y;
+        /* Clamp to canvas */
+        if (cmx + CTX_MENU_W > cw) cmx = cw - CTX_MENU_W;
+        if (cmy + cmh > ch) cmy = ch - cmh;
+        /* Shadow */
+        fill_rect(win->canvas, cw, ch, cmx + 3, cmy + 3, CTX_MENU_W, cmh, 0x404040);
+        /* Background */
+        fill_rect(win->canvas, cw, ch, cmx, cmy, CTX_MENU_W, cmh, 0xF0EAD8);
+        /* Border */
+        for (int i = cmx; i < cmx + CTX_MENU_W; i++) {
+            if (cmy >= 0 && cmy < ch) win->canvas[cmy * cw + i] = 0x807060;
+            if (cmy + cmh - 1 < ch) win->canvas[(cmy + cmh - 1) * cw + i] = 0x807060;
+        }
+        for (int i = cmy; i < cmy + cmh; i++) {
+            if (cmx >= 0) win->canvas[i * cw + cmx] = 0x807060;
+            if (cmx + CTX_MENU_W - 1 < cw) win->canvas[i * cw + cmx + CTX_MENU_W - 1] = 0x807060;
+        }
+        /* Items */
+        int protected = (ctx_menu_target >= 0 && is_system_entry(ctx_menu_target));
+        if (ctx_menu_open == 2) {
+            /* Empty-space: show only Paste */
+            int iy = cmy + 2;
+            uint32_t fg = clipboard_path[0] ? COL_TEXT : 0xA0A0A0;
+            canvas_draw_string(win->canvas, cw, ch, cmx + 8, iy + 3, "Paste", fg);
+        } else {
+            for (int i = 0; i < ctx_items; i++) {
+                int iy = cmy + 2 + i * CTX_MENU_ITEM_H;
+                uint32_t fg = COL_TEXT;
+                /* Grey out rename/delete/cut for system files */
+                if (protected && (i == 0 || i == 1 || i == 3)) fg = 0xA0A0A0;
+                canvas_draw_string(win->canvas, cw, ch, cmx + 8, iy + 3,
+                                   ctx_labels[i], fg);
+            }
+        }
+        #undef CTX_MENU_W
+        #undef CTX_MENU_ITEM_H
+    }
+
+    /* Rename dialog overlay */
+    if (rename_dialog_active) {
+        int dw = 280, dh = 90;
+        int dx = (cw - dw) / 2, dy = (ch - dh) / 2;
+        /* Shadow */
+        fill_rect(win->canvas, cw, ch, dx + 3, dy + 3, dw, dh, 0x404040);
+        /* Background */
+        fill_rect(win->canvas, cw, ch, dx, dy, dw, dh, 0xF0EAD8);
+        /* Border */
+        for (int i = dx; i < dx + dw; i++) {
+            if (dy >= 0 && dy < ch) win->canvas[dy * cw + i] = 0x807060;
+            if (dy + dh - 1 < ch) win->canvas[(dy + dh - 1) * cw + i] = 0x807060;
+        }
+        for (int i = dy; i < dy + dh; i++) {
+            if (dx >= 0) win->canvas[i * cw + dx] = 0x807060;
+            if (dx + dw - 1 < cw) win->canvas[i * cw + dx + dw - 1] = 0x807060;
+        }
+        /* Title */
+        canvas_draw_string(win->canvas, cw, ch, dx + 10, dy + 8, "Rename:", COL_TEXT);
+        /* Input field */
+        fill_rect(win->canvas, cw, ch, dx + 10, dy + 28, dw - 20, 22, 0xFFFFF0);
+        /* Input border */
+        for (int i = dx + 10; i < dx + dw - 10; i++) {
+            win->canvas[(dy + 28) * cw + i] = 0x807060;
+            win->canvas[(dy + 49) * cw + i] = 0x807060;
+        }
+        for (int i = dy + 28; i < dy + 50; i++) {
+            win->canvas[i * cw + dx + 10] = 0x807060;
+            win->canvas[i * cw + dx + dw - 11] = 0x807060;
+        }
+        canvas_draw_string(win->canvas, cw, ch, dx + 14, dy + 31, rename_input, 0x1A1A1A);
+        /* OK / Cancel buttons */
+        fill_rect(win->canvas, cw, ch, dx + dw - 140, dy + dh - 28, 60, 22, 0xD8D0C0);
+        canvas_draw_string(win->canvas, cw, ch, dx + dw - 128, dy + dh - 24, "OK", COL_TEXT);
+        fill_rect(win->canvas, cw, ch, dx + dw - 70, dy + dh - 28, 60, 22, 0xD8D0C0);
+        canvas_draw_string(win->canvas, cw, ch, dx + dw - 60, dy + dh - 24, "Cancel", COL_TEXT);
+    }
+}
+
+/* ── Navigate to a path ────────────────────────────────────────────────── */
+static void navigate_to(const char *path)
+{
+    int i = 0;
+    while (path[i] && i < PATH_MAX_LEN - 1) {
+        current_path[i] = path[i]; i++;
+    }
+    current_path[i] = 0;
+    vfs_open(current_path, &current_dir);
+    refresh_listing();
+}
+
+/* ── Build full path for entry ────────────────────────────────────────── */
+static void build_entry_path(int idx, char *out, int max_len)
+{
+    int i = 0;
+    const char *p = current_path;
+    while (*p && i < max_len - 1) out[i++] = *p++;
+    const char *n = entries[idx].name;
+    while (*n && i < max_len - 1) out[i++] = *n++;
+    out[i] = 0;
 }
 
 /* ── Mouse callback ───────────────────────────────────────────────────── */
 static void explorer_mouse(window_t *win, int mx, int my, int buttons)
 {
     (void)win;
-    if (!(buttons & 1)) return;
-
     int cw = win->width - 4;
-    (void)cw;
+    int ch = win->height - 4;
+    int list_y = 36;
+    int list_h = ch - list_y - 24;
+    int max_scroll = entry_count > VISIBLE_ROWS ? entry_count - VISIBLE_ROWS : 0;
+    int left_click = (buttons & 1) && !(prev_buttons & 1);  /* rising edge */
+    int right_click = (buttons & 2) && !(prev_buttons & 2);
+    prev_buttons = buttons;
+    int file_x = SIDEBAR_W + 2;
+
+    /* Handle scrollbar drag */
+    if (scrollbar_dragging) {
+        if (!(buttons & 1)) {
+            scrollbar_dragging = 0;
+            return;
+        }
+        if (max_scroll > 0 && list_h > 0) {
+            int thumb_h = list_h * VISIBLE_ROWS / (entry_count > VISIBLE_ROWS ? entry_count : VISIBLE_ROWS);
+            if (thumb_h < 20) thumb_h = 20;
+            int track_range = list_h - thumb_h;
+            if (track_range > 0) {
+                int thumb_top = my - scrollbar_drag_offset;
+                int new_offset = (thumb_top - list_y) * max_scroll / track_range;
+                if (new_offset < 0) new_offset = 0;
+                if (new_offset > max_scroll) new_offset = max_scroll;
+                scroll_offset = new_offset;
+            }
+        }
+        return;
+    }
+
+    /* Rename dialog click handling */
+    if (rename_dialog_active && left_click) {
+        int dw = 280, dh = 90;
+        int dx = (cw - dw) / 2, dy = (ch - dh) / 2;
+        /* OK button */
+        if (mx >= dx + dw - 140 && mx < dx + dw - 80 &&
+            my >= dy + dh - 28 && my < dy + dh - 6) {
+            if (rename_input_len > 0 && rename_target_index >= 0) {
+                char old_path[PATH_MAX_LEN];
+                build_entry_path(rename_target_index, old_path, PATH_MAX_LEN);
+                char new_path[PATH_MAX_LEN];
+                int ni = 0;
+                const char *cp = current_path;
+                while (*cp && ni < PATH_MAX_LEN - 1) new_path[ni++] = *cp++;
+                if (ni > 0 && new_path[ni - 1] != '/' && ni < PATH_MAX_LEN - 1) new_path[ni++] = '/';
+                const char *rn = rename_input;
+                while (*rn && ni < PATH_MAX_LEN - 1) new_path[ni++] = *rn++;
+                new_path[ni] = 0;
+                vfs_rename(old_path, new_path);
+                refresh_listing();
+            }
+            rename_dialog_active = 0;
+        }
+        /* Cancel button */
+        if (mx >= dx + dw - 70 && mx < dx + dw - 10 &&
+            my >= dy + dh - 28 && my < dy + dh - 6) {
+            rename_dialog_active = 0;
+        }
+        return;
+    }
+
+    /* Right-click: open context menu */
+    if (right_click) {
+        if (my >= list_y && mx >= file_x) {
+            int vi = (my - list_y) / ENTRY_HEIGHT;
+            int ei = scroll_offset + vi;
+            if (ei < entry_count) {
+                ctx_menu_open = 1;
+                ctx_menu_x = mx;
+                ctx_menu_y = my;
+                ctx_menu_target = ei;
+                selected_index = ei;
+            } else {
+                /* Right-click in empty space: show Paste-only menu */
+                ctx_menu_open = 2;  /* 2 = empty-space mode */
+                ctx_menu_x = mx;
+                ctx_menu_y = my;
+                ctx_menu_target = -1;
+            }
+        }
+        return;
+    }
+
+    /* Left-click while context menu is open */
+    if (left_click && ctx_menu_open) {
+        /* Check if click is inside context menu */
+        int cmx = ctx_menu_x, cmy = ctx_menu_y;
+        int cmw = 100;
+        int ctx_items = (ctx_menu_open == 2) ? 1 : 5;
+        int cmh = ctx_items * 22 + 4;
+        if (cmx + cmw > cw) cmx = cw - cmw;
+        if (cmy + cmh > ch) cmy = ch - cmh;
+        if (mx >= cmx && mx < cmx + cmw && my >= cmy && my < cmy + cmh) {
+            int item = (my - cmy - 2) / 22;
+            if (ctx_menu_open == 2) {
+                /* Empty-space menu: item 0 = Paste */
+                if (item == 0 && clipboard_path[0]) {
+                    char dest_path[PATH_MAX_LEN];
+                    int di = 0;
+                    const char *cp = current_path;
+                    while (*cp && di < PATH_MAX_LEN - 1) dest_path[di++] = *cp++;
+                    if (di > 0 && dest_path[di - 1] != '/' && di < PATH_MAX_LEN - 1) dest_path[di++] = '/';
+                    cp = clipboard_name;
+                    while (*cp && di < PATH_MAX_LEN - 1) dest_path[di++] = *cp++;
+                    dest_path[di] = 0;
+                    vfs_node_t src_node;
+                    if (vfs_open(clipboard_path, &src_node) == 0 &&
+                        src_node.type == VFS_FILE) {
+                        char copy_buf[4096];
+                        uint64_t file_sz = src_node.size;
+                        if (file_sz > sizeof(copy_buf)) file_sz = sizeof(copy_buf);
+                        int bytes = vfs_read(&src_node, 0, file_sz, copy_buf);
+                        if (bytes > 0) {
+                            vfs_create(dest_path, VFS_FILE);
+                            vfs_node_t dst_node;
+                            if (vfs_open(dest_path, &dst_node) == 0) {
+                                vfs_write(&dst_node, 0, bytes, copy_buf);
+                            }
+                        }
+                    }
+                    if (clipboard_cut) {
+                        vfs_delete(clipboard_path);
+                        clipboard_path[0] = 0;
+                        clipboard_name[0] = 0;
+                    }
+                    refresh_listing();
+                }
+            } else {
+            int protected = (ctx_menu_target >= 0 && is_system_entry(ctx_menu_target));
+            if (item >= 0 && item < 5) {
+                char path_buf[PATH_MAX_LEN];
+                if (ctx_menu_target >= 0)
+                    build_entry_path(ctx_menu_target, path_buf, PATH_MAX_LEN);
+                switch (item) {
+                case 0: /* Rename */
+                    if (!protected && ctx_menu_target >= 0) {
+                        /* Start rename dialog */
+                        rename_dialog_active = 1;
+                        rename_target_index = ctx_menu_target;
+                        rename_input_len = 0;
+                        /* Pre-fill with current name */
+                        const char *n = entries[ctx_menu_target].name;
+                        while (*n && rename_input_len < VFS_MAX_NAME - 1) {
+                            rename_input[rename_input_len++] = *n++;
+                        }
+                        rename_input[rename_input_len] = 0;
+                    }
+                    break;
+                case 1: /* Delete */
+                    if (!protected && ctx_menu_target >= 0) {
+                        vfs_delete(path_buf);
+                        refresh_listing();
+                    }
+                    break;
+                case 2: /* Copy */
+                    if (ctx_menu_target >= 0) {
+                        int ci = 0;
+                        const char *p = path_buf;
+                        while (*p && ci < PATH_MAX_LEN - 1) clipboard_path[ci++] = *p++;
+                        clipboard_path[ci] = 0;
+                        ci = 0;
+                        const char *n = entries[ctx_menu_target].name;
+                        while (*n && ci < VFS_MAX_NAME - 1) clipboard_name[ci++] = *n++;
+                        clipboard_name[ci] = 0;
+                        clipboard_cut = 0;
+                    }
+                    break;
+                case 3: /* Cut */
+                    if (!protected && ctx_menu_target >= 0) {
+                        int ci = 0;
+                        const char *p = path_buf;
+                        while (*p && ci < PATH_MAX_LEN - 1) clipboard_path[ci++] = *p++;
+                        clipboard_path[ci] = 0;
+                        ci = 0;
+                        const char *n = entries[ctx_menu_target].name;
+                        while (*n && ci < VFS_MAX_NAME - 1) clipboard_name[ci++] = *n++;
+                        clipboard_name[ci] = 0;
+                        clipboard_cut = 1;
+                    }
+                    break;
+                case 4: /* Paste */
+                    if (clipboard_path[0]) {
+                        /* Paste: copy file data to current directory */
+                        char dest_path[PATH_MAX_LEN];
+                        int di = 0;
+                        const char *cp = current_path;
+                        while (*cp && di < PATH_MAX_LEN - 1) dest_path[di++] = *cp++;
+                        if (di > 0 && dest_path[di - 1] != '/' && di < PATH_MAX_LEN - 1) dest_path[di++] = '/';
+                        cp = clipboard_name;
+                        while (*cp && di < PATH_MAX_LEN - 1) dest_path[di++] = *cp++;
+                        dest_path[di] = 0;
+                        /* Read source and write to dest */
+                        vfs_node_t src_node;
+                        if (vfs_open(clipboard_path, &src_node) == 0 &&
+                            src_node.type == VFS_FILE) {
+                            char copy_buf[4096];
+                            uint64_t file_sz = src_node.size;
+                            if (file_sz > sizeof(copy_buf)) file_sz = sizeof(copy_buf);
+                            int bytes = vfs_read(&src_node, 0, file_sz, copy_buf);
+                            if (bytes > 0) {
+                                vfs_create(dest_path, VFS_FILE);
+                                vfs_node_t dst_node;
+                                if (vfs_open(dest_path, &dst_node) == 0) {
+                                    vfs_write(&dst_node, 0, bytes, copy_buf);
+                                }
+                            }
+                        }
+                        if (clipboard_cut) {
+                            vfs_delete(clipboard_path);
+                            clipboard_path[0] = 0;
+                            clipboard_name[0] = 0;
+                        }
+                        refresh_listing();
+                    }
+                    break;
+                }
+            }
+            }
+        }
+        ctx_menu_open = 0;
+        return;
+    }
+
+    if (!left_click) return;
+
+    /* Close context menu on any left click */
+    ctx_menu_open = 0;
 
     /* Back button */
     if (mx >= 4 && mx < 54 && my >= 4 && my < 28) {
         /* Navigate to parent */
         int len = str_len(current_path);
         if (len > 1) {
-            /* Remove trailing component */
-            current_path[len - 1] = 0; /* strip trailing '/' */
+            current_path[len - 1] = 0;
             while (len > 1 && current_path[len - 2] != '/') {
                 current_path[--len - 1] = 0;
             }
@@ -274,20 +738,78 @@ static void explorer_mouse(window_t *win, int mx, int my, int buttons)
         return;
     }
 
-    /* File list click */
-    int list_y = 36;
-    if (my >= list_y) {
+    /* Sidebar clicks */
+    if (mx < SIDEBAR_W && my >= list_y) {
+        int rel_y = my - list_y;
+        /* Quick-access folders */
+        if (rel_y >= 24 && rel_y < 24 + SIDEBAR_FOLDER_COUNT * 22) {
+            int idx = (rel_y - 24) / 22;
+            if (idx >= 0 && idx < SIDEBAR_FOLDER_COUNT) {
+                navigate_to(sidebar_folders[idx].path);
+            }
+            return;
+        }
+        /* Root directory link */
+        int sep_y_rel = 24 + SIDEBAR_FOLDER_COUNT * 22 + 4;
+        if (rel_y >= sep_y_rel + 4 && rel_y < sep_y_rel + 24) {
+            navigate_to("/");
+            return;
+        }
+        return;
+    }
+
+    /* Scrollbar thumb drag start */
+    if (mx >= cw - 14 && mx < cw - 2 && my >= list_y && my < list_y + list_h) {
+        if (entry_count > VISIBLE_ROWS) {
+            int thumb_h = list_h * VISIBLE_ROWS / entry_count;
+            if (thumb_h < 20) thumb_h = 20;
+            int track_range = list_h - thumb_h;
+            int thumb_y = list_y;
+            if (track_range > 0 && max_scroll > 0)
+                thumb_y = list_y + track_range * scroll_offset / max_scroll;
+            if (my >= thumb_y && my < thumb_y + thumb_h) {
+                scrollbar_dragging = 1;
+                scrollbar_drag_offset = my - thumb_y;
+                return;
+            }
+            if (my < thumb_y) {
+                scroll_offset -= VISIBLE_ROWS;
+                if (scroll_offset < 0) scroll_offset = 0;
+            } else {
+                scroll_offset += VISIBLE_ROWS;
+                if (scroll_offset > max_scroll) scroll_offset = max_scroll;
+            }
+        }
+        return;
+    }
+
+    /* File list click (right of sidebar) */
+    if (my >= list_y && mx >= file_x) {
         int vi = (my - list_y) / ENTRY_HEIGHT;
         int ei = scroll_offset + vi;
         if (ei < entry_count) {
-            if (ei == selected_index && entries[ei].type == VFS_DIRECTORY) {
-                /* Double-click simulation: navigate into directory */
-                str_cat(current_path, entries[ei].name);
-                str_cat(current_path, "/");
-                current_dir = entries[ei];
-                refresh_listing();
+            uint64_t now = timer_get_ticks();
+            if (last_click_index == ei &&
+                (now - last_click_tick) < DBLCLICK_MS) {
+                /* Double-click detected */
+                last_click_index = -1;
+                if (entries[ei].type == VFS_DIRECTORY) {
+                    str_cat(current_path, entries[ei].name);
+                    str_cat(current_path, "/");
+                    current_dir = entries[ei];
+                    refresh_listing();
+                } else {
+                    char fpath[PATH_MAX_LEN];
+                    fpath[0] = 0;
+                    str_cat(fpath, current_path);
+                    str_cat(fpath, entries[ei].name);
+                    notepad_open_file(fpath);
+                }
             } else {
+                /* Single click: select */
                 selected_index = ei;
+                last_click_index = ei;
+                last_click_tick = now;
             }
         }
     }
@@ -296,8 +818,41 @@ static void explorer_mouse(window_t *win, int mx, int my, int buttons)
 /* ── Key callback ─────────────────────────────────────────────────────── */
 static void explorer_key(window_t *win, char ascii, int scancode, int pressed)
 {
-    (void)win; (void)ascii;
+    (void)win;
     if (!pressed) return;
+
+    /* Rename dialog typing */
+    if (rename_dialog_active) {
+        if (ascii == '\b') {
+            if (rename_input_len > 0) rename_input[--rename_input_len] = 0;
+        } else if (ascii == '\n') {
+            /* Confirm rename */
+            if (rename_input_len > 0 && rename_target_index >= 0) {
+                char old_path[PATH_MAX_LEN];
+                build_entry_path(rename_target_index, old_path, PATH_MAX_LEN);
+                char new_path[PATH_MAX_LEN];
+                int ni = 0;
+                const char *cp = current_path;
+                while (*cp && ni < PATH_MAX_LEN - 1) new_path[ni++] = *cp++;
+                if (ni > 0 && new_path[ni - 1] != '/' && ni < PATH_MAX_LEN - 1) new_path[ni++] = '/';
+                const char *rn = rename_input;
+                while (*rn && ni < PATH_MAX_LEN - 1) new_path[ni++] = *rn++;
+                new_path[ni] = 0;
+                vfs_rename(old_path, new_path);
+                refresh_listing();
+            }
+            rename_dialog_active = 0;
+        } else if (ascii == 27) {
+            /* Escape = cancel */
+            rename_dialog_active = 0;
+        } else if (ascii >= 32 && rename_input_len < VFS_MAX_NAME - 1) {
+            rename_input[rename_input_len++] = ascii;
+            rename_input[rename_input_len] = 0;
+        }
+        return;
+    }
+
+    (void)scancode;
 
     /* Up/Down arrow navigation */
     if (scancode == 0x48) { /* Up */
@@ -340,7 +895,7 @@ void explorer_launch(void)
         refresh_listing();
     }
 
-    explorer_win = compositor_create_window("File Explorer", 150, 80, 450, 380);
+    explorer_win = compositor_create_window("File Explorer", 120, 60, 550, 400);
     if (!explorer_win) return;
 
     explorer_win->on_paint = explorer_paint;
