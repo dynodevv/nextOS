@@ -829,10 +829,9 @@ static int tls_send_client_hello(const char *host)
     msg[pos++] = 0;
 
     /* Cipher suites - offer AES_128_CBC_SHA256 primarily */
-    msg[pos++] = 0; msg[pos++] = 6;  /* 3 cipher suites = 6 bytes */
+    msg[pos++] = 0; msg[pos++] = 4;  /* 2 cipher suites = 4 bytes */
     msg[pos++] = 0x00; msg[pos++] = 0x3C;  /* TLS_RSA_WITH_AES_128_CBC_SHA256 */
     msg[pos++] = 0x00; msg[pos++] = 0x2F;  /* TLS_RSA_WITH_AES_128_CBC_SHA */
-    msg[pos++] = 0x00; msg[pos++] = 0x35;  /* TLS_RSA_WITH_AES_256_CBC_SHA */
 
     /* Compression methods */
     msg[pos++] = 1;  /* 1 method */
@@ -866,6 +865,17 @@ static int tls_send_client_hello(const char *host)
     msg[pos++] = 0x04; msg[pos++] = 0x01;  /* RSA/PKCS1/SHA256 */
     msg[pos++] = 0x05; msg[pos++] = 0x01;  /* RSA/PKCS1/SHA384 */
     msg[pos++] = 0x02; msg[pos++] = 0x01;  /* RSA/PKCS1/SHA1 */
+
+    /* EC point formats extension (some servers require this) */
+    msg[pos++] = 0x00; msg[pos++] = 0x0b;  /* ec_point_formats */
+    msg[pos++] = 0x00; msg[pos++] = 0x02;  /* extension length */
+    msg[pos++] = 0x01;                      /* list length */
+    msg[pos++] = 0x00;                      /* uncompressed */
+
+    /* Renegotiation info extension (empty, signals initial handshake) */
+    msg[pos++] = 0xFF; msg[pos++] = 0x01;  /* renegotiation_info */
+    msg[pos++] = 0x00; msg[pos++] = 0x01;  /* extension length */
+    msg[pos++] = 0x00;                      /* empty renegotiated_connection */
 
     /* Fill extensions length */
     int ext_len = pos - ext_start;
@@ -1005,8 +1015,7 @@ static void tls_derive_keys(const uint8_t *pre_master_secret)
 {
     /* Determine MAC length from negotiated cipher suite:
      * 0x002F = AES_128_CBC_SHA    -> HMAC-SHA-1   (20 bytes)
-     * 0x003C = AES_128_CBC_SHA256 -> HMAC-SHA-256 (32 bytes)
-     * 0x0035 = AES_256_CBC_SHA    -> HMAC-SHA-1   (20 bytes) */
+     * 0x003C = AES_128_CBC_SHA256 -> HMAC-SHA-256 (32 bytes) */
     if (tls_cipher_suite == 0x003C)
         tls_mac_len = 32;
     else
@@ -1315,13 +1324,22 @@ static int tls_receive_server_finished(void)
         if (rec_type == TLS_CHANGE_CIPHER) {
             got_ccs = 1;
         } else if (rec_type == TLS_HANDSHAKE && got_ccs) {
-            /* Encrypted Finished - decrypt it */
+            /* Encrypted handshake - decrypt it */
             uint8_t pt[256];
             int pt_len = tls_decrypt_record(tls_recv_buf, rec_len, pt, sizeof(pt));
-            if (pt_len < 16) return -1;
+            if (pt_len < 4) return -1;
 
-            /* Verify: pt should be Finished(20) + verify_data(12) */
-            if (pt[0] != TLS_FINISHED) return -1;
+            uint8_t hs_type = pt[0];
+
+            /* Skip NewSessionTicket (type 4) - many servers send this */
+            if (hs_type == 0x04) {
+                /* NewSessionTicket: ignore but continue waiting for Finished */
+                continue;
+            }
+
+            /* Verify: should be Finished(20) + verify_data(12) */
+            if (hs_type != TLS_FINISHED) return -1;
+            if (pt_len < 16) return -1;
 
             /* Compute expected server verify_data */
             uint8_t hs_hash[32];
