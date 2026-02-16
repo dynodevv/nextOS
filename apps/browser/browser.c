@@ -152,7 +152,7 @@ static int  scroll_y = 0;
 static int  content_total_h = 0;  /* Total rendered content height */
 
 /* Clickable link regions */
-#define MAX_LINKS 128
+#define MAX_LINKS 256
 typedef struct {
     int x, y, w, h;       /* Bounding box (in content coordinates, not scrolled) */
     char href[URL_MAX];   /* Link URL */
@@ -168,6 +168,7 @@ typedef struct {
     char name[64];                   /* Input name attribute */
     char value[FORM_INPUT_MAX];      /* Current value */
     int is_submit;                   /* 1 if submit button */
+    int user_modified;               /* 1 if user has typed into this input */
 } form_input_t;
 static form_input_t form_inputs[MAX_FORM_INPUTS];
 static int form_input_count = 0;
@@ -175,8 +176,36 @@ static int focused_input = -1;       /* Index of focused text input, -1 if none 
 static char form_action[URL_MAX];    /* Form action URL */
 static char form_method[8];          /* "get" or "post" */
 
+/* Saved form values to preserve user input across re-renders */
+#define SAVED_INPUT_MAX MAX_FORM_INPUTS
+typedef struct {
+    char name[64];
+    char value[FORM_INPUT_MAX];
+} saved_input_t;
+static saved_input_t saved_inputs[SAVED_INPUT_MAX];
+static int saved_input_count = 0;
+static char saved_focused_name[64]; /* Name of focused input to restore */
+
 /* Hover state for status bar */
 static char hover_url[URL_MAX];
+
+/* CSS style rules parsed from <style> blocks */
+#define MAX_CSS_RULES 32
+#define CSS_SELECTOR_MAX 32
+#define CSS_VALUE_MAX 64
+typedef struct {
+    char selector[CSS_SELECTOR_MAX]; /* e.g. "body", "a", "h1" */
+    uint32_t color;
+    int has_color;
+    uint32_t bg_color;
+    int has_bg_color;
+    int bold;        /* 1=force bold, -1=no change */
+    int italic;      /* 1=force italic, -1=no change */
+    int underline;   /* 1=force underline, -1=no change */
+    int text_align;  /* 0=default, 1=left, 2=center, 3=right */
+} css_rule_t;
+static css_rule_t css_rules[MAX_CSS_RULES];
+static int css_rule_count = 0;
 
 /* Navigation states */
 #define NAV_IDLE     0
@@ -339,10 +368,192 @@ static int url_encode(const char *src, char *dst, int max)
     return oi;
 }
 
+/* ── Form Value Persistence ──────────────────────────────────────────── */
+/* Save user-typed form values before re-render so they survive render_html reset */
+static void save_form_inputs(void)
+{
+    saved_input_count = 0;
+    saved_focused_name[0] = 0;
+    for (int i = 0; i < form_input_count && saved_input_count < SAVED_INPUT_MAX; i++) {
+        form_input_t *fi = &form_inputs[i];
+        if (!fi->is_submit && fi->name[0]) {
+            saved_input_t *si = &saved_inputs[saved_input_count++];
+            str_cpy(si->name, fi->name);
+            str_cpy(si->value, fi->value);
+        }
+    }
+    if (focused_input >= 0 && focused_input < form_input_count)
+        str_cpy(saved_focused_name, form_inputs[focused_input].name);
+}
+
+/* Restore user-typed value for a newly registered input (if previously saved) */
+static void restore_form_input(form_input_t *fi)
+{
+    if (!fi->name[0]) return;
+    for (int i = 0; i < saved_input_count; i++) {
+        if (str_cmp(saved_inputs[i].name, fi->name) == 0) {
+            str_cpy(fi->value, saved_inputs[i].value);
+            fi->user_modified = 1;
+            break;
+        }
+    }
+}
+
+/* Restore focused_input index by name after re-render */
+static void restore_focused_input(void)
+{
+    if (!saved_focused_name[0]) return;
+    for (int i = 0; i < form_input_count; i++) {
+        if (str_cmp(form_inputs[i].name, saved_focused_name) == 0 &&
+            !form_inputs[i].is_submit) {
+            focused_input = i;
+            return;
+        }
+    }
+}
+
+/* ── CSS Parser ─────────────────────────────────────────────────────── */
+/* Forward declarations */
+static uint32_t named_color(const char *name);
+static uint32_t parse_html_color(const char *s);
+
+static void css_skip_whitespace(const char *s, int *pos, int len)
+{
+    while (*pos < len && (s[*pos] == ' ' || s[*pos] == '\t' ||
+           s[*pos] == '\n' || s[*pos] == '\r')) (*pos)++;
+}
+
+static void parse_css_block(const char *css, int css_len)
+{
+    int pos = 0;
+    while (pos < css_len && css_rule_count < MAX_CSS_RULES) {
+        css_skip_whitespace(css, &pos, css_len);
+        if (pos >= css_len) break;
+
+        /* Skip comments */
+        if (pos + 1 < css_len && css[pos] == '/' && css[pos+1] == '*') {
+            pos += 2;
+            while (pos + 1 < css_len && !(css[pos] == '*' && css[pos+1] == '/')) pos++;
+            if (pos + 1 < css_len) pos += 2;
+            continue;
+        }
+
+        /* Read selector */
+        char selector[CSS_SELECTOR_MAX];
+        int si = 0;
+        while (pos < css_len && css[pos] != '{' && css[pos] != ',' && si < CSS_SELECTOR_MAX - 1) {
+            char c = css[pos];
+            if (c >= 'A' && c <= 'Z') c += 32;
+            if (c != ' ' && c != '\t' && c != '\n' && c != '\r')
+                selector[si++] = c;
+            pos++;
+        }
+        selector[si] = 0;
+
+        /* Skip complex selectors with . # : [ + > ~ */
+        int skip_rule = 0;
+        for (int i = 0; selector[i]; i++) {
+            if (selector[i] == '.' || selector[i] == '#' || selector[i] == ':' ||
+                selector[i] == '[' || selector[i] == '+' || selector[i] == '>' ||
+                selector[i] == '~') { skip_rule = 1; break; }
+        }
+
+        if (css[pos] == ',') { pos++; continue; } /* Multi-selector: skip */
+        if (pos >= css_len || css[pos] != '{') continue;
+        pos++; /* Skip { */
+
+        /* Find end of declarations */
+        int decl_start = pos;
+        int brace_depth = 1;
+        while (pos < css_len && brace_depth > 0) {
+            if (css[pos] == '{') brace_depth++;
+            else if (css[pos] == '}') brace_depth--;
+            pos++;
+        }
+        int decl_end = pos - 1;
+
+        if (skip_rule || !selector[0]) continue;
+
+        css_rule_t *rule = &css_rules[css_rule_count];
+        str_cpy(rule->selector, selector);
+        rule->has_color = 0;
+        rule->has_bg_color = 0;
+        rule->bold = -1;
+        rule->italic = -1;
+        rule->underline = -1;
+        rule->text_align = 0;
+
+        /* Parse declarations */
+        int dp = decl_start;
+        while (dp < decl_end) {
+            css_skip_whitespace(css, &dp, decl_end);
+            /* Read property name */
+            char prop[32];
+            int pi = 0;
+            while (dp < decl_end && css[dp] != ':' && css[dp] != ';' && pi < 31) {
+                char c = css[dp];
+                if (c >= 'A' && c <= 'Z') c += 32;
+                if (c != ' ' && c != '\t') prop[pi++] = c;
+                dp++;
+            }
+            prop[pi] = 0;
+            if (dp >= decl_end || css[dp] != ':') { dp++; continue; }
+            dp++; /* Skip : */
+            css_skip_whitespace(css, &dp, decl_end);
+
+            /* Read value */
+            char val[CSS_VALUE_MAX];
+            int vi = 0;
+            while (dp < decl_end && css[dp] != ';' && css[dp] != '}' && vi < CSS_VALUE_MAX - 1) {
+                val[vi++] = css[dp++];
+            }
+            /* Trim trailing whitespace */
+            while (vi > 0 && (val[vi-1] == ' ' || val[vi-1] == '\t' ||
+                   val[vi-1] == '\n' || val[vi-1] == '\r')) vi--;
+            val[vi] = 0;
+            if (dp < decl_end && css[dp] == ';') dp++;
+
+            /* Apply property */
+            if (str_cmp(prop, "color") == 0) {
+                rule->color = named_color(val);
+                rule->has_color = 1;
+            } else if (str_cmp(prop, "background-color") == 0 || str_cmp(prop, "background") == 0) {
+                rule->bg_color = named_color(val);
+                rule->has_bg_color = 1;
+            } else if (str_cmp(prop, "font-weight") == 0) {
+                rule->bold = (str_ncasecmp(val, "bold", 4) == 0) ? 1 : 0;
+            } else if (str_cmp(prop, "font-style") == 0) {
+                rule->italic = (str_ncasecmp(val, "italic", 6) == 0) ? 1 : 0;
+            } else if (str_cmp(prop, "text-decoration") == 0) {
+                rule->underline = (str_ncasecmp(val, "underline", 9) == 0) ? 1 : 0;
+            } else if (str_cmp(prop, "text-align") == 0) {
+                if (str_ncasecmp(val, "center", 6) == 0) rule->text_align = 2;
+                else if (str_ncasecmp(val, "right", 5) == 0) rule->text_align = 3;
+                else rule->text_align = 1;
+            }
+        }
+        css_rule_count++;
+    }
+}
+
+/* Look up a CSS rule for a given tag name and apply it */
+static css_rule_t *css_lookup(const char *tag_name)
+{
+    for (int i = 0; i < css_rule_count; i++) {
+        if (str_cmp(css_rules[i].selector, tag_name) == 0)
+            return &css_rules[i];
+    }
+    return 0;
+}
+
+/* Parse inline style attribute and apply to render state */
+static void apply_inline_style(const char *tag, int tag_len);
+
 /* ── HTML Renderer ───────────────────────────────────────────────────── */
 /*
- * Simple streaming HTML renderer. Parses tags and renders text
+ * Streaming HTML renderer. Parses tags and renders text
  * directly into the window canvas.
+ * Supports basic centering via two-pass line measurement.
  */
 
 /* Render state */
@@ -380,14 +591,25 @@ typedef struct {
     int table_col;         /* Current column in table row */
     int table_col_x;       /* X position for current table column */
 
-    /* Font color stack (simplified: single level) */
-    uint32_t saved_color;
-    int color_saved;
+    /* Font color/style stack (simplified: 4 levels) */
+#define COLOR_STACK_MAX 4
+    uint32_t color_stack[COLOR_STACK_MAX];
+    int color_stack_depth;
 
     /* Current link tracking */
     char link_href[URL_MAX];  /* href of current <a> */
     int link_start_x;         /* x position where link text starts */
     int link_start_y;         /* y position where link text starts */
+
+    /* Centering support: accumulate line content for deferred render */
+    int center_defer;         /* 1 if we're deferring render for centering */
+#define CENTER_BUF_MAX 256
+    char center_buf[CENTER_BUF_MAX]; /* Buffer for centered line */
+    int center_buf_len;
+    int center_line_bold;     /* bold state for centered line */
+
+    /* Whitespace suppression after block tags */
+    int last_was_block;       /* 1 if last element was a block tag (suppress leading space) */
 } render_state_t;
 
 static render_state_t rs;
@@ -459,15 +681,68 @@ static uint32_t named_color(const char *name)
     return 0xFFFFFF;
 }
 
+/* Flush centered line buffer: render accumulated text centered */
+static void flush_center_buf(void)
+{
+    if (rs.center_buf_len <= 0) return;
+    int char_w = rs.center_line_bold ? 9 : 8;
+    int text_w = rs.center_buf_len * char_w;
+    int avail = rs.max_x - rs.start_x;
+    int offset = (avail - text_w) / 2;
+    if (offset < 0) offset = 0;
+    int draw_x = rs.start_x + offset;
+    int draw_y = rs.y - rs.scroll;
+
+    if (draw_y >= -16 && draw_y < rs.ch) {
+        uint32_t fg = rs.in_link ? rs.link_color : rs.text_color;
+        for (int i = 0; i < rs.center_buf_len; i++) {
+            if (rs.center_line_bold)
+                canvas_draw_char_bold(rs.canvas, rs.cw, rs.ch,
+                    draw_x + i * char_w, draw_y, rs.center_buf[i], fg);
+            else
+                canvas_draw_char(rs.canvas, rs.cw, rs.ch,
+                    draw_x + i * char_w, draw_y, rs.center_buf[i], fg);
+            if (rs.underline && draw_y + 15 >= 0 && draw_y + 15 < rs.ch)
+                for (int col = 0; col < char_w; col++)
+                    if (draw_x + i * char_w + col >= 0 && draw_x + i * char_w + col < rs.cw)
+                        rs.canvas[(draw_y + 15) * rs.cw + draw_x + i * char_w + col] = fg;
+        }
+    }
+    /* Update rs.x to end of centered text for link tracking */
+    rs.x = rs.start_x + offset + rs.center_buf_len * char_w;
+    rs.center_buf_len = 0;
+}
+
 static void render_newline(void)
 {
+    if (rs.centered && rs.center_buf_len > 0)
+        flush_center_buf();
     rs.x = rs.start_x;
     rs.y += rs.line_height;
+    rs.center_buf_len = 0;
 }
 
 static void render_char(char c)
 {
     if (rs.in_title || rs.in_head || rs.in_style || rs.in_script) return;
+
+    /* Centering mode: accumulate chars in buffer */
+    if (rs.centered) {
+        int char_w = rs.bold ? 9 : 8;
+        /* Check word wrap */
+        int buf_w = rs.center_buf_len * char_w;
+        if (buf_w + char_w > rs.max_x - rs.start_x && !rs.preformatted) {
+            flush_center_buf();
+            rs.y += rs.line_height;
+        }
+        if (rs.center_buf_len < CENTER_BUF_MAX - 1) {
+            rs.center_buf[rs.center_buf_len++] = c;
+            rs.center_line_bold = rs.bold;
+        }
+        /* Keep rs.x updated for link region tracking */
+        rs.x += char_w;
+        return;
+    }
 
     int draw_y = rs.y - rs.scroll;
 
@@ -547,6 +822,61 @@ static int get_attr(const char *tag, int tag_len, const char *attr, char *out, i
     return 0;
 }
 
+/* Parse inline style="" attribute and apply to render state */
+static void apply_inline_style(const char *tag, int tag_len)
+{
+    char style[128];
+    if (!get_attr(tag, tag_len, "style", style, sizeof(style))) return;
+
+    int pos = 0;
+    int slen = str_len(style);
+    while (pos < slen) {
+        /* Skip whitespace */
+        while (pos < slen && (style[pos] == ' ' || style[pos] == '\t')) pos++;
+
+        /* Read property */
+        char prop[32];
+        int pi = 0;
+        while (pos < slen && style[pos] != ':' && style[pos] != ';' && pi < 31) {
+            char c = style[pos];
+            if (c >= 'A' && c <= 'Z') c += 32;
+            if (c != ' ' && c != '\t') prop[pi++] = c;
+            pos++;
+        }
+        prop[pi] = 0;
+        if (pos >= slen || style[pos] != ':') { pos++; continue; }
+        pos++; /* skip : */
+        while (pos < slen && style[pos] == ' ') pos++;
+
+        /* Read value */
+        char val[CSS_VALUE_MAX];
+        int vi = 0;
+        while (pos < slen && style[pos] != ';' && vi < CSS_VALUE_MAX - 1) {
+            val[vi++] = style[pos++];
+        }
+        while (vi > 0 && val[vi-1] == ' ') vi--;
+        val[vi] = 0;
+        if (pos < slen && style[pos] == ';') pos++;
+
+        /* Apply */
+        if (str_cmp(prop, "color") == 0) {
+            rs.text_color = named_color(val);
+        } else if (str_cmp(prop, "background-color") == 0 || str_cmp(prop, "background") == 0) {
+            /* For block elements, could fill area */
+        } else if (str_cmp(prop, "font-weight") == 0) {
+            rs.bold = (str_ncasecmp(val, "bold", 4) == 0) ? 1 : 0;
+        } else if (str_cmp(prop, "font-style") == 0) {
+            rs.italic = (str_ncasecmp(val, "italic", 6) == 0) ? 1 : 0;
+        } else if (str_cmp(prop, "text-decoration") == 0) {
+            if (str_ncasecmp(val, "underline", 9) == 0) rs.underline = 1;
+            else if (str_ncasecmp(val, "line-through", 12) == 0) rs.strikethrough = 1;
+            else if (str_ncasecmp(val, "none", 4) == 0) { rs.underline = 0; rs.strikethrough = 0; }
+        } else if (str_cmp(prop, "text-align") == 0) {
+            if (str_ncasecmp(val, "center", 6) == 0) rs.centered = 1;
+        }
+    }
+}
+
 static void handle_tag(const char *tag, int tag_len)
 {
     /* Skip < and find tag name */
@@ -566,6 +896,14 @@ static void handle_tag(const char *tag, int tag_len)
             name[ni-1] += 32;
     }
     name[ni] = 0;
+
+    /* Flush centered text buffer before tags that draw inline content */
+    if (rs.centered && rs.center_buf_len > 0 &&
+        (str_cmp(name, "input") == 0 || str_cmp(name, "img") == 0 ||
+         str_cmp(name, "button") == 0 || str_cmp(name, "textarea") == 0 ||
+         str_cmp(name, "select") == 0)) {
+        flush_center_buf();
+    }
 
     /* Self-closing tags */
     if (str_cmp(name, "br") == 0) {
@@ -702,6 +1040,9 @@ static void handle_tag(const char *tag, int tag_len)
                         str_cpy(fi->name, inp_name);
                         str_cpy(fi->value, value);
                         fi->is_submit = 0;
+                        fi->user_modified = 0;
+                        /* Restore user-typed value if available */
+                        restore_form_input(fi);
                         form_input_count++;
                     }
 
@@ -775,42 +1116,51 @@ static void handle_tag(const char *tag, int tag_len)
         }
     /* Block-level tags */
     } else if (str_cmp(name, "p") == 0) {
-        if (is_close) { rs.y += 8; rs.x = rs.start_x; }
-        else { render_newline(); rs.y += 4; }
+        if (is_close) {
+            if (rs.color_stack_depth > 0)
+                rs.text_color = rs.color_stack[--rs.color_stack_depth];
+            rs.y += 8; rs.x = rs.start_x;
+        } else {
+            if (rs.color_stack_depth < COLOR_STACK_MAX)
+                rs.color_stack[rs.color_stack_depth++] = rs.text_color;
+            render_newline(); rs.y += 4;
+            apply_inline_style(tag, tag_len);
+        }
     } else if (str_cmp(name, "div") == 0) {
-        if (!is_close) { render_newline(); }
-        else { render_newline(); }
+        if (!is_close) {
+            if (rs.color_stack_depth < COLOR_STACK_MAX)
+                rs.color_stack[rs.color_stack_depth++] = rs.text_color;
+            render_newline();
+            apply_inline_style(tag, tag_len);
+        } else {
+            if (rs.color_stack_depth > 0)
+                rs.text_color = rs.color_stack[--rs.color_stack_depth];
+            render_newline();
+        }
     } else if (str_cmp(name, "span") == 0) {
         /* Inline element - check for style color */
         if (!is_close) {
-            char style[64];
-            if (get_attr(tag, tag_len, "style", style, sizeof(style))) {
-                /* Look for color: in style */
-                for (int si = 0; style[si]; si++) {
-                    if (str_ncasecmp(style + si, "color:", 6) == 0) {
-                        int ci = si + 6;
-                        while (style[ci] == ' ') ci++;
-                        char cv[16];
-                        int cvi = 0;
-                        while (style[ci] && style[ci] != ';' && style[ci] != '"' && cvi < 15)
-                            cv[cvi++] = style[ci++];
-                        cv[cvi] = 0;
-                        rs.saved_color = rs.text_color;
-                        rs.color_saved = 1;
-                        rs.text_color = named_color(cv);
-                        break;
-                    }
-                }
-            }
+            /* Push current color */
+            if (rs.color_stack_depth < COLOR_STACK_MAX)
+                rs.color_stack[rs.color_stack_depth++] = rs.text_color;
+            apply_inline_style(tag, tag_len);
         } else {
-            if (rs.color_saved) { rs.text_color = rs.saved_color; rs.color_saved = 0; }
+            if (rs.color_stack_depth > 0)
+                rs.text_color = rs.color_stack[--rs.color_stack_depth];
         }
     } else if (str_cmp(name, "blockquote") == 0) {
         if (is_close) { rs.start_x -= 30; rs.max_x += 10; render_newline(); rs.y += 4; }
         else { rs.start_x += 30; rs.max_x -= 10; render_newline(); rs.y += 4; }
     } else if (str_cmp(name, "center") == 0) {
-        rs.centered = !is_close;
-        if (!is_close) render_newline();
+        if (is_close) {
+            if (rs.center_buf_len > 0) flush_center_buf();
+            rs.centered = 0;
+            render_newline();
+        } else {
+            render_newline();
+            rs.centered = 1;
+            rs.center_buf_len = 0;
+        }
     /* Inline formatting tags */
     } else if (str_cmp(name, "b") == 0 || str_cmp(name, "strong") == 0) {
         rs.bold = !is_close;
@@ -834,16 +1184,54 @@ static void handle_tag(const char *tag, int tag_len)
         (void)is_close;
     } else if (str_cmp(name, "a") == 0) {
         if (is_close) {
-            /* Register link region */
-            if (rs.in_link && rs.link_href[0] && link_count < MAX_LINKS) {
-                link_region_t *lr = &page_links[link_count];
-                lr->x = rs.link_start_x;
-                lr->y = rs.link_start_y;
-                lr->w = rs.x - rs.link_start_x;
-                lr->h = rs.line_height;
-                if (lr->w > 0) {
-                    str_cpy(lr->href, rs.link_href);
-                    link_count++;
+            /* Register link region - handle multi-line links */
+            if (rs.in_link && rs.link_href[0]) {
+                if (rs.y == rs.link_start_y) {
+                    /* Single-line link */
+                    if (link_count < MAX_LINKS) {
+                        link_region_t *lr = &page_links[link_count];
+                        lr->x = rs.link_start_x;
+                        lr->y = rs.link_start_y;
+                        lr->w = rs.x - rs.link_start_x;
+                        lr->h = rs.line_height;
+                        if (lr->w > 0) {
+                            str_cpy(lr->href, rs.link_href);
+                            link_count++;
+                        }
+                    }
+                } else {
+                    /* Multi-line: first line from start_x to max_x */
+                    if (link_count < MAX_LINKS) {
+                        link_region_t *lr = &page_links[link_count];
+                        lr->x = rs.link_start_x;
+                        lr->y = rs.link_start_y;
+                        lr->w = rs.max_x - rs.link_start_x;
+                        lr->h = rs.line_height;
+                        str_cpy(lr->href, rs.link_href);
+                        link_count++;
+                    }
+                    /* Middle lines: full width */
+                    int mid_y = rs.link_start_y + rs.line_height;
+                    while (mid_y < rs.y && link_count < MAX_LINKS) {
+                        link_region_t *lr = &page_links[link_count];
+                        lr->x = rs.start_x;
+                        lr->y = mid_y;
+                        lr->w = rs.max_x - rs.start_x;
+                        lr->h = rs.line_height;
+                        str_cpy(lr->href, rs.link_href);
+                        link_count++;
+                        mid_y += rs.line_height;
+                    }
+                    /* Last line: start_x to current x */
+                    if (link_count < MAX_LINKS && rs.x > rs.start_x) {
+                        link_region_t *lr = &page_links[link_count];
+                        lr->x = rs.start_x;
+                        lr->y = rs.y;
+                        lr->w = rs.x - rs.start_x;
+                        lr->h = rs.line_height;
+                        str_cpy(lr->href, rs.link_href);
+                        link_count++;
+                    }
                 }
             }
             rs.in_link = 0;
@@ -864,13 +1252,14 @@ static void handle_tag(const char *tag, int tag_len)
         }
     } else if (str_cmp(name, "font") == 0) {
         if (is_close) {
-            if (rs.color_saved) { rs.text_color = rs.saved_color; rs.color_saved = 0; }
-            /* Font size: restore bold if we changed it */
+            if (rs.color_stack_depth > 0)
+                rs.text_color = rs.color_stack[--rs.color_stack_depth];
         } else {
+            /* Push current color */
+            if (rs.color_stack_depth < COLOR_STACK_MAX)
+                rs.color_stack[rs.color_stack_depth++] = rs.text_color;
             char color_val[32];
             if (get_attr(tag, tag_len, "color", color_val, sizeof(color_val))) {
-                rs.saved_color = rs.text_color;
-                rs.color_saved = 1;
                 rs.text_color = named_color(color_val);
             }
             /* Font size: sizes 5-7 render as bold */
@@ -917,6 +1306,16 @@ static void handle_tag(const char *tag, int tag_len)
             if (get_attr(tag, tag_len, "link", link_val, sizeof(link_val))) {
                 rs.link_color = named_color(link_val);
             }
+            /* Apply CSS for body and inline style */
+            css_rule_t *css = css_lookup("body");
+            if (css) {
+                if (css->has_color) rs.text_color = css->color;
+                if (css->has_bg_color) {
+                    rs.bg_color = css->bg_color;
+                    fill_rect(rs.canvas, rs.cw, rs.ch, 0, 0, rs.cw, rs.ch, rs.bg_color);
+                }
+            }
+            apply_inline_style(tag, tag_len);
         }
     /* Heading tags */
     } else if (name[0] == 'h' && name[1] >= '1' && name[1] <= '6' && name[2] == 0) {
@@ -1096,7 +1495,21 @@ static void handle_tag(const char *tag, int tag_len)
     } else if (str_cmp(name, "map") == 0 || str_cmp(name, "area") == 0) {
         (void)is_close;
     }
-    /* All unknown tags are silently ignored */
+    /* Set last_was_block for known block-level tags to suppress whitespace */
+    if (str_cmp(name, "br") == 0 || str_cmp(name, "hr") == 0 ||
+        str_cmp(name, "p") == 0 || str_cmp(name, "div") == 0 ||
+        str_cmp(name, "center") == 0 || str_cmp(name, "blockquote") == 0 ||
+        str_cmp(name, "h1") == 0 || str_cmp(name, "h2") == 0 ||
+        str_cmp(name, "h3") == 0 || str_cmp(name, "h4") == 0 ||
+        str_cmp(name, "h5") == 0 || str_cmp(name, "h6") == 0 ||
+        str_cmp(name, "ul") == 0 || str_cmp(name, "ol") == 0 ||
+        str_cmp(name, "li") == 0 || str_cmp(name, "table") == 0 ||
+        str_cmp(name, "tr") == 0 || str_cmp(name, "td") == 0 ||
+        str_cmp(name, "th") == 0 || str_cmp(name, "form") == 0 ||
+        str_cmp(name, "pre") == 0 || str_cmp(name, "dl") == 0 ||
+        str_cmp(name, "dt") == 0 || str_cmp(name, "dd") == 0 ||
+        (name[0] == 'h' && name[1] >= '1' && name[1] <= '6' && name[2] == 0))
+        rs.last_was_block = 1;
 }
 
 /* Decode HTML entities */
@@ -1191,11 +1604,40 @@ static char decode_entity(const char *s, int *advance)
 static void render_html(const char *html, int html_len,
                         uint32_t *canvas, int cw, int ch, int scroll)
 {
+    /* Save user-typed form values before resetting */
+    save_form_inputs();
+
     /* Reset link and form tracking */
     link_count = 0;
     form_input_count = 0;
     form_action[0] = 0;
     str_cpy(form_method, "get");
+    css_rule_count = 0;
+
+    /* Pre-scan for <style> blocks to extract CSS rules */
+    {
+        int si = 0;
+        while (si < html_len - 7) {
+            if (html[si] == '<' && str_ncasecmp(html + si + 1, "style", 5) == 0 &&
+                (html[si + 6] == '>' || html[si + 6] == ' ')) {
+                /* Find end of style opening tag */
+                int css_start = si + 6;
+                while (css_start < html_len && html[css_start] != '>') css_start++;
+                css_start++;
+                /* Find </style> */
+                int css_end = css_start;
+                while (css_end + 7 < html_len) {
+                    if (html[css_end] == '<' && html[css_end+1] == '/' &&
+                        str_ncasecmp(html + css_end + 2, "style", 5) == 0) break;
+                    css_end++;
+                }
+                if (css_end > css_start)
+                    parse_css_block(html + css_start, css_end - css_start);
+                si = css_end;
+            }
+            si++;
+        }
+    }
 
     /* Initialize render state */
     rs.canvas = canvas;
@@ -1230,11 +1672,22 @@ static void render_html(const char *html, int html_len,
     rs.in_table_row = 0;
     rs.table_col = 0;
     rs.table_col_x = 8;
-    rs.saved_color = 0x1A1A1A;
-    rs.color_saved = 0;
+    rs.color_stack_depth = 0;
     rs.link_href[0] = 0;
     rs.link_start_x = 0;
     rs.link_start_y = 0;
+    rs.center_defer = 0;
+    rs.center_buf_len = 0;
+    rs.last_was_block = 1;  /* Suppress leading whitespace */
+
+    /* Apply CSS rules for body if available */
+    css_rule_t *body_css = css_lookup("body");
+    if (body_css) {
+        if (body_css->has_color) rs.text_color = body_css->color;
+        if (body_css->has_bg_color) rs.bg_color = body_css->bg_color;
+    }
+    css_rule_t *a_css = css_lookup("a");
+    if (a_css && a_css->has_color) rs.link_color = a_css->color;
 
     /* Clear canvas */
     fill_rect(canvas, cw, ch, 0, 0, cw, ch, rs.bg_color);
@@ -1291,13 +1744,17 @@ static void render_html(const char *html, int html_len,
                 }
             } else if (!rs.in_style && !rs.in_script) {
                 char c = html[i];
-                if (c == '\n' || c == '\r') {
-                    if (rs.preformatted) render_newline();
-                    else {
-                        /* Collapse to single space */
-                        if (rs.x > rs.start_x) render_char(' ');
+                if (c == '\n' || c == '\r' || c == '\t' || c == ' ') {
+                    if (rs.preformatted) {
+                        if (c == '\n') render_newline();
+                        else if (c == '\t') { for (int t = 0; t < 4; t++) render_char(' '); }
+                        else render_char(' ');
+                    } else {
+                        /* Collapse whitespace; suppress after block tags */
+                        if (!rs.last_was_block && rs.x > rs.start_x) render_char(' ');
                     }
                 } else if (c >= 32) {
+                    rs.last_was_block = 0;
                     /* Render printable chars; map non-ASCII to '?' */
                     if (c > 126) c = '?';
                     render_char(c);
@@ -1307,8 +1764,15 @@ static void render_html(const char *html, int html_len,
         }
     }
 
+    /* Flush any pending centered text */
+    if (rs.centered && rs.center_buf_len > 0)
+        flush_center_buf();
+
     /* Record total content height for scrollbar */
     content_total_h = rs.y + rs.line_height;
+
+    /* Restore focused input by name */
+    restore_focused_input();
 }
 
 /* ── Default Homepage ────────────────────────────────────────────────── */
@@ -1333,6 +1797,7 @@ static const char homepage[] =
     "<p><b>Block:</b> div, p, h1-h6, pre, blockquote, center, table, tr, td, th, ul, ol, li, dl, dt, dd, hr, br</p>"
     "<p><b>Inline:</b> b, strong, i, em, u, s, strike, a, font, span, code, small, big, sup, sub</p>"
     "<p><b>Forms:</b> input (text, submit, checkbox, radio), button, textarea, select</p>"
+    "<p><b>CSS:</b> Inline style attributes (color, font-weight, text-decoration, text-align) and &lt;style&gt; block rules</p>"
     "<h2>Tips</h2>"
     "<ol>"
     "<li>Enter a URL like <u>http://frogfind.com</u> in the address bar</li>"
@@ -1356,6 +1821,8 @@ static void load_homepage(void)
     scroll_y = 0;
     focused_input = -1;
     hover_url[0] = 0;
+    saved_input_count = 0;
+    saved_focused_name[0] = 0;
     nav_state = NAV_DONE;
     str_cpy(status_msg, "Ready");
 }
@@ -1415,6 +1882,10 @@ static void navigate(const char *url)
 static void navigate_internal(const char *url, int push_history)
 {
     if (!url || !url[0]) return;
+
+    /* Clear saved form values for new page */
+    saved_input_count = 0;
+    saved_focused_name[0] = 0;
 
     /* Handle about: URLs */
     if (str_ncmp(url, "about:", 6) == 0) {
