@@ -521,15 +521,19 @@ static void parse_css_block(const char *css, int css_len)
                 rule->bg_color = named_color(val);
                 rule->has_bg_color = 1;
             } else if (str_cmp(prop, "font-weight") == 0) {
-                rule->bold = (str_ncasecmp(val, "bold", 4) == 0) ? 1 : 0;
+                if (str_ncasecmp(val, "bold", 4) == 0) rule->bold = 1;
+                else if (str_ncasecmp(val, "normal", 6) == 0) rule->bold = 0;
+                /* Ignore unrecognized values (leave as -1 / no change) */
             } else if (str_cmp(prop, "font-style") == 0) {
-                rule->italic = (str_ncasecmp(val, "italic", 6) == 0) ? 1 : 0;
+                if (str_ncasecmp(val, "italic", 6) == 0) rule->italic = 1;
+                else if (str_ncasecmp(val, "normal", 6) == 0) rule->italic = 0;
             } else if (str_cmp(prop, "text-decoration") == 0) {
-                rule->underline = (str_ncasecmp(val, "underline", 9) == 0) ? 1 : 0;
+                if (str_ncasecmp(val, "underline", 9) == 0) rule->underline = 1;
+                else if (str_ncasecmp(val, "none", 4) == 0) rule->underline = 0;
             } else if (str_cmp(prop, "text-align") == 0) {
                 if (str_ncasecmp(val, "center", 6) == 0) rule->text_align = 2;
                 else if (str_ncasecmp(val, "right", 5) == 0) rule->text_align = 3;
-                else rule->text_align = 1;
+                else if (str_ncasecmp(val, "left", 4) == 0) rule->text_align = 1;
             }
         }
         css_rule_count++;
@@ -864,9 +868,11 @@ static void apply_inline_style(const char *tag, int tag_len)
         } else if (str_cmp(prop, "background-color") == 0 || str_cmp(prop, "background") == 0) {
             /* For block elements, could fill area */
         } else if (str_cmp(prop, "font-weight") == 0) {
-            rs.bold = (str_ncasecmp(val, "bold", 4) == 0) ? 1 : 0;
+            if (str_ncasecmp(val, "bold", 4) == 0) rs.bold = 1;
+            else if (str_ncasecmp(val, "normal", 6) == 0) rs.bold = 0;
         } else if (str_cmp(prop, "font-style") == 0) {
-            rs.italic = (str_ncasecmp(val, "italic", 6) == 0) ? 1 : 0;
+            if (str_ncasecmp(val, "italic", 6) == 0) rs.italic = 1;
+            else if (str_ncasecmp(val, "normal", 6) == 0) rs.italic = 0;
         } else if (str_cmp(prop, "text-decoration") == 0) {
             if (str_ncasecmp(val, "underline", 9) == 0) rs.underline = 1;
             else if (str_ncasecmp(val, "line-through", 12) == 0) rs.strikethrough = 1;
