@@ -140,6 +140,8 @@ static window_t *browser_win = 0;
 #define STATUS_H     20
 #define SCROLLBAR_W  14
 #define NAV_BTN_W    28
+#define COL_SELECT_BG  0x3399FF
+#define COL_SELECT_TXT 0xFFFFFF
 
 static char url_bar[URL_MAX];
 static int  url_cursor = 0;
@@ -1602,7 +1604,7 @@ static void handle_tag(const char *tag, int tag_len)
                     /* Always show the current stored value (which includes user-typed text) */
                     if (fi_idx >= 0 && form_inputs[fi_idx].value[0]) {
                         txt = form_inputs[fi_idx].value;
-                        txt_color = show_input_sel ? 0xFFFFFF : 0x1A1A1A;
+                        txt_color = show_input_sel ? COL_SELECT_TXT : 0x1A1A1A;
                     } else if (placeholder[0]) {
                         txt = placeholder;
                         txt_color = 0xA0A0A0;
@@ -1621,7 +1623,7 @@ static void handle_tag(const char *tag, int tag_len)
                         /* Selection highlight */
                         if (show_input_sel)
                             fill_rect(rs.canvas, rs.cw, rs.ch, rs.x + 2, draw_y + 2,
-                                      ci2 * 8 + 4, 18, 0x3399FF);
+                                      ci2 * 8 + 4, 18, COL_SELECT_BG);
                         canvas_draw_string(rs.canvas, rs.cw, rs.ch, rs.x + 4, draw_y + 3,
                                            clipped, txt_color);
                     }
@@ -2998,10 +3000,10 @@ static void browser_paint(window_t *win)
         for (int ci = start; url_bar[ci] && (ci - start) < max_chars; ci++) sel_len++;
         if (sel_len > 0)
             fill_rect(win->canvas, cw, ch, url_x + 4, btn_y + 2,
-                      sel_len * 8, btn_h - 4, 0x3399FF);
+                      sel_len * 8, btn_h - 4, COL_SELECT_BG);
     }
     {
-        uint32_t url_text_color = (url_select_all && url_bar[0]) ? 0xFFFFFF : 0x1A1A1A;
+        uint32_t url_text_color = (url_select_all && url_bar[0]) ? COL_SELECT_TXT : 0x1A1A1A;
         for (int ci = start; url_bar[ci] && (ci - start) < max_chars; ci++) {
             canvas_draw_char(win->canvas, cw, ch,
                              url_x + 4 + (ci - start) * 8, btn_y + 4, url_bar[ci], url_text_color);

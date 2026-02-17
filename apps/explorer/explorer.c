@@ -101,6 +101,8 @@ static int is_system_path(const char *path)
 #define COL_TEXT_SEL     0xFFFFFF
 #define COL_PATH_BG      0xFFF8E8
 #define COL_SCROLLBAR    0xB0A890
+#define COL_SELECT_HI    0x3399FF   /* CTRL+A selection highlight */
+#define COL_SELECT_TXT   0xFFFFFF   /* Text on selection highlight */
 
 /* ── Helpers ──────────────────────────────────────────────────────────── */
 static int str_len(const char *s) { int n = 0; while (s[n]) n++; return n; }
@@ -450,8 +452,8 @@ static void explorer_paint(window_t *win)
         canvas_draw_string(win->canvas, cw, ch, dx + 10, dy + 8, "Rename:", COL_TEXT);
         /* Input field */
         if (rename_select_all && rename_input_len > 0) {
-            fill_rect(win->canvas, cw, ch, dx + 10, dy + 28, dw - 20, 22, 0x3399FF);
-            canvas_draw_string(win->canvas, cw, ch, dx + 14, dy + 31, rename_input, 0xFFFFFF);
+            fill_rect(win->canvas, cw, ch, dx + 10, dy + 28, dw - 20, 22, COL_SELECT_HI);
+            canvas_draw_string(win->canvas, cw, ch, dx + 14, dy + 31, rename_input, COL_SELECT_TXT);
         } else {
             fill_rect(win->canvas, cw, ch, dx + 10, dy + 28, dw - 20, 22, 0xFFFFF0);
             canvas_draw_string(win->canvas, cw, ch, dx + 14, dy + 31, rename_input, 0x1A1A1A);
