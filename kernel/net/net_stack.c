@@ -80,6 +80,10 @@ static int tcp_rx_head = 0;
 static int tcp_rx_tail = 0;
 
 /* ── IP checksum ─────────────────────────────────────────────────────── */
+/* Computes the Internet checksum (RFC 1071) over on-wire (network byte order)
+ * data.  The sum is byte-order independent because the folding arithmetic
+ * produces the same result regardless of host endianness.  The odd-byte case
+ * adds the last byte in the low position, which matches RFC 1071 behaviour. */
 static uint16_t ip_checksum(const void *data, int len)
 {
     const uint16_t *p = (const uint16_t *)data;
@@ -94,6 +98,8 @@ static uint16_t ip_checksum(const void *data, int len)
 }
 
 /* ── TCP pseudo-header checksum ──────────────────────────────────────── */
+/* IPs (our_ip, dst_ip) are stored in network byte order throughout the stack,
+ * so the pseudo-header words are already in the correct on-wire order. */
 static uint16_t tcp_checksum(uint32_t src_ip, uint32_t dst_ip,
                              const void *tcp_data, int tcp_len)
 {
@@ -126,7 +132,11 @@ static void send_eth(const uint8_t dst[6], uint16_t ethertype,
     eth->ethertype = htons(ethertype);
     mem_copy(pkt_buf + sizeof(eth_header_t), payload, payload_len);
     int total = (int)sizeof(eth_header_t) + payload_len;
-    if (total < 60) total = 60;  /* Minimum Ethernet frame size */
+    if (total < 60) {
+        int pad_start = total;
+        total = 60;  /* Minimum Ethernet frame size */
+        mem_zero(pkt_buf + pad_start, total - pad_start);
+    }
     net_send(pkt_buf, total);
 }
 
@@ -248,6 +258,7 @@ static void send_ipv4(uint32_t dst_ip, uint8_t protocol,
     ip->ttl = 64;
     ip->protocol = protocol;
     ip->checksum = 0;
+    /* IPs are stored in network byte order throughout the stack */
     ip->src_ip = our_ip;
     ip->dst_ip = dst_ip;
     ip->checksum = ip_checksum(ip, 20);
@@ -306,6 +317,8 @@ static void tcp_handle(uint32_t src_ip, const uint8_t *data, int len)
     uint32_t seq = ntohl(tcp->seq_num);
     uint32_t ack = ntohl(tcp->ack_num);
     int hdr_len = (tcp->data_offset >> 4) * 4;
+    if (hdr_len < 20 || hdr_len > len)
+        return;
     int payload_len = len - hdr_len;
 
     if (dst_port != tcp_local_port || src_ip != tcp_remote_ip)
@@ -369,9 +382,12 @@ static void udp_handle(uint32_t src_ip, const uint8_t *data, int len)
 {
     if (len < 8) return;
     const udp_header_t *udp = (const udp_header_t *)data;
+    uint16_t udp_len = ntohs(udp->length);
+    if (udp_len < 8 || udp_len > (uint16_t)len)
+        return;
     uint16_t src_port = ntohs(udp->src_port);
     uint16_t dst_port = ntohs(udp->dst_port);
-    int payload_len = ntohs(udp->length) - 8;
+    int payload_len = (int)udp_len - 8;
     const uint8_t *payload = data + 8;
 
     (void)src_ip;
@@ -396,6 +412,7 @@ static void ipv4_handle(const uint8_t *data, int len)
     if (len < 20) return;
     const ipv4_header_t *ip = (const ipv4_header_t *)data;
     int hdr_len = (ip->ver_ihl & 0x0F) * 4;
+    if (hdr_len < 20 || hdr_len > len) return;
     int total = ntohs(ip->total_len);
     if (total > len) total = len;
     int payload_len = total - hdr_len;
@@ -621,9 +638,14 @@ int tcp_receive_data(void *buf, int buf_size, int timeout_ms)
         }
 
         if (received > 0 && tcp_rx_tail == tcp_rx_head) {
-            /* Got some data and buffer empty, wait a bit for more */
+            /* Got some data and buffer empty, wait for more but respect timeout */
+            uint64_t remaining_ms = 0;
+            uint64_t elapsed = timer_get_ticks() - start;
+            if (elapsed < (uint64_t)timeout_ms)
+                remaining_ms = (uint64_t)timeout_ms - elapsed;
+            uint64_t inter_wait = (remaining_ms < 500) ? remaining_ms : 500;
             uint64_t wait_start = timer_get_ticks();
-            while (timer_get_ticks() - wait_start < 100) {
+            while (timer_get_ticks() - wait_start < inter_wait) {
                 net_stack_process();
                 if (tcp_rx_tail != tcp_rx_head) break;
             }
@@ -678,14 +700,30 @@ int http_get(const char *host, uint16_t port, const char *path,
     /* Build HTTP request */
     char request[512];
     int rpos = 0;
+    int max_rpos = (int)(sizeof(request) - 1);
     const char *get = "GET ";
-    for (int i = 0; get[i]; i++) request[rpos++] = get[i];
-    for (int i = 0; path[i]; i++) request[rpos++] = path[i];
+    for (int i = 0; get[i]; i++) {
+        if (rpos >= max_rpos) { tcp_close(); return -1; }
+        request[rpos++] = get[i];
+    }
+    for (int i = 0; path[i]; i++) {
+        if (rpos >= max_rpos) { tcp_close(); return -1; }
+        request[rpos++] = path[i];
+    }
     const char *ver = " HTTP/1.1\r\nHost: ";
-    for (int i = 0; ver[i]; i++) request[rpos++] = ver[i];
-    for (int i = 0; host[i]; i++) request[rpos++] = host[i];
+    for (int i = 0; ver[i]; i++) {
+        if (rpos >= max_rpos) { tcp_close(); return -1; }
+        request[rpos++] = ver[i];
+    }
+    for (int i = 0; host[i]; i++) {
+        if (rpos >= max_rpos) { tcp_close(); return -1; }
+        request[rpos++] = host[i];
+    }
     const char *hdr = "\r\nConnection: close\r\nUser-Agent: nextOS/2.5.0\r\n\r\n";
-    for (int i = 0; hdr[i]; i++) request[rpos++] = hdr[i];
+    for (int i = 0; hdr[i]; i++) {
+        if (rpos >= max_rpos) { tcp_close(); return -1; }
+        request[rpos++] = hdr[i];
+    }
     request[rpos] = 0;
 
     /* Send request */
@@ -923,6 +961,7 @@ static int tls_read_record(uint8_t *out_type, uint8_t *buf, int buf_size)
         total += chunk;
         remaining -= chunk;
     }
+    if (remaining != 0) return -1;
     return total;
 }
 
@@ -1001,7 +1040,11 @@ static int tls_process_server_handshake(rsa_pubkey_t *server_key)
     if (!got_hello || !got_cert) return -1;
     if (tls_cert_len == 0) return -1;
 
-    /* Extract RSA public key from certificate */
+    /* Extract RSA public key from certificate
+     * NOTE: This implementation does NOT validate the certificate chain,
+     * expiration, or hostname. HTTPS connections are therefore vulnerable
+     * to man-in-the-middle attacks. Full certificate validation (chain of
+     * trust, CRL/OCSP, hostname matching) is not yet implemented. */
     if (rsa_extract_pubkey(tls_cert_buf, tls_cert_len, server_key) != 0)
         return -1;
     if (server_key->mod_len == 0)
@@ -1246,7 +1289,7 @@ static int tls_send_encrypted(uint8_t rec_type, const uint8_t *data, int data_le
 
 /* Decrypt a TLS record */
 static int tls_decrypt_record(const uint8_t *data, int data_len,
-                              uint8_t *out, int max_out)
+                              uint8_t rec_type, uint8_t *out, int max_out)
 {
     if (data_len < 32) return -1;  /* Need at least IV(16) + one block(16) */
 
@@ -1278,6 +1321,17 @@ static int tls_decrypt_record(const uint8_t *data, int data_len,
     /* MAC length depends on cipher suite */
     if (content_plus_mac < tls_mac_len) return -1;
     int content_len = content_plus_mac - tls_mac_len;
+
+    /* Verify MAC: compute expected MAC over decrypted content */
+    uint8_t expected_mac[32];
+    tls_compute_mac(tls_server_write_mac_key, tls_server_seq,
+                    rec_type, out, content_len, expected_mac);
+    const uint8_t *received_mac = out + content_len;
+    int mac_ok = 1;
+    for (int i = 0; i < tls_mac_len; i++) {
+        if (received_mac[i] != expected_mac[i]) { mac_ok = 0; break; }
+    }
+    if (!mac_ok) return -1;
 
     tls_server_seq++;
     return content_len;
@@ -1326,7 +1380,7 @@ static int tls_receive_server_finished(void)
         } else if (rec_type == TLS_HANDSHAKE && got_ccs) {
             /* Encrypted handshake - decrypt it */
             uint8_t pt[256];
-            int pt_len = tls_decrypt_record(tls_recv_buf, rec_len, pt, sizeof(pt));
+            int pt_len = tls_decrypt_record(tls_recv_buf, rec_len, TLS_HANDSHAKE, pt, sizeof(pt));
             if (pt_len < 4) return -1;
 
             uint8_t hs_type = pt[0];
@@ -1438,14 +1492,30 @@ int https_get(const char *host, uint16_t port, const char *path,
     /* Step 7: Send HTTP request over TLS */
     char request[512];
     int rpos = 0;
+    int max_rpos = (int)(sizeof(request) - 1);
     const char *get = "GET ";
-    for (int i = 0; get[i]; i++) request[rpos++] = get[i];
-    for (int i = 0; path[i]; i++) request[rpos++] = path[i];
+    for (int i = 0; get[i]; i++) {
+        if (rpos >= max_rpos) { tcp_close(); return -1; }
+        request[rpos++] = get[i];
+    }
+    for (int i = 0; path[i]; i++) {
+        if (rpos >= max_rpos) { tcp_close(); return -1; }
+        request[rpos++] = path[i];
+    }
     const char *ver = " HTTP/1.1\r\nHost: ";
-    for (int i = 0; ver[i]; i++) request[rpos++] = ver[i];
-    for (int i = 0; host[i]; i++) request[rpos++] = host[i];
+    for (int i = 0; ver[i]; i++) {
+        if (rpos >= max_rpos) { tcp_close(); return -1; }
+        request[rpos++] = ver[i];
+    }
+    for (int i = 0; host[i]; i++) {
+        if (rpos >= max_rpos) { tcp_close(); return -1; }
+        request[rpos++] = host[i];
+    }
     const char *hdr = "\r\nConnection: close\r\nUser-Agent: nextOS/2.5.0\r\nAccept: text/html,*/*\r\n\r\n";
-    for (int i = 0; hdr[i]; i++) request[rpos++] = hdr[i];
+    for (int i = 0; hdr[i]; i++) {
+        if (rpos >= max_rpos) { tcp_close(); return -1; }
+        request[rpos++] = hdr[i];
+    }
     request[rpos] = 0;
 
     if (tls_send_encrypted(TLS_APPLICATION, (uint8_t *)request, rpos) < 0) {
@@ -1467,7 +1537,7 @@ int https_get(const char *host, uint16_t port, const char *path,
 
         if (rec_type == TLS_APPLICATION) {
             uint8_t pt[TLS_RECV_BUF_SIZE];
-            int pt_len = tls_decrypt_record(tls_recv_buf, rec_len, pt, sizeof(pt));
+            int pt_len = tls_decrypt_record(tls_recv_buf, rec_len, TLS_APPLICATION, pt, sizeof(pt));
             if (pt_len <= 0) break;
 
             if (!header_done) {

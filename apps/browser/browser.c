@@ -280,9 +280,14 @@ static int parse_url(const char *url, parsed_url_t *out)
             out->port = out->port * 10 + (*p++ - '0');
     }
 
-    /* Path */
+    /* Path (bounded to prevent overflow) */
     if (*p == '/') {
-        str_cpy(out->path, p);
+        int pi = 0;
+        while (p[pi] && pi < 127) {
+            out->path[pi] = p[pi];
+            pi++;
+        }
+        out->path[pi] = 0;
     }
 
     return hi > 0;
@@ -2809,8 +2814,16 @@ static void navigate_internal(const char *url, int push_history)
         return;
     }
 
+    /* Build status message with bounded host to prevent overflow */
     str_cpy(status_msg, "Resolving ");
-    str_cat(status_msg, purl.host);
+    {
+        int slen = str_len(status_msg);
+        int hlen = str_len(purl.host);
+        int avail = (int)sizeof(status_msg) - slen - 4; /* room for "..." + NUL */
+        if (hlen > avail) hlen = avail;
+        for (int i = 0; i < hlen; i++) status_msg[slen + i] = purl.host[i];
+        status_msg[slen + hlen] = 0;
+    }
     str_cat(status_msg, "...");
 
     if (purl.is_https) {

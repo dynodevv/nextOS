@@ -793,28 +793,103 @@ int rsa_pkcs1_encrypt(const rsa_pubkey_t *key,
     return k;
 }
 
-/* ── PRNG ────────────────────────────────────────────────────────────── */
+/* ── PRNG (SHA-256 based CTR-DRBG) ───────────────────────────────────── */
+/*
+ * Uses a SHA-256-based counter-mode DRBG for TLS random generation.
+ * Seeds with RDRAND (if available) plus timer ticks for entropy.
+ *
+ * NOTE: Entropy sources are limited on bare-metal (timer ticks, RDRAND).
+ * While significantly stronger than the previous xorshift/LCG PRNG,
+ * this should still be considered "best effort" until additional
+ * entropy sources (NIC interrupt timings, user input jitter) are added.
+ */
+static uint8_t prng_key[32];
+static uint64_t prng_counter = 0;
+static int prng_seeded = 0;
+
+/* Try to read a 64-bit value from RDRAND. Returns 1 on success, 0 if unavailable. */
+static int try_rdrand64(uint64_t *out)
+{
+    uint32_t eax, ebx, ecx, edx;
+    /* CPUID leaf 1: check ECX bit 30 (RDRAND) */
+    __asm__ volatile("cpuid" : "=a"(eax), "=b"(ebx), "=c"(ecx), "=d"(edx)
+                     : "a"(1));
+    if (!(ecx & (1u << 30))) return 0;
+
+    uint64_t val;
+    uint8_t ok;
+    __asm__ volatile("rdrand %0; setc %1" : "=r"(val), "=qm"(ok));
+    if (!ok) return 0;
+    *out = val;
+    return 1;
+}
+
+static void prng_seed(void)
+{
+    uint8_t seed[64];
+    int si = 0;
+
+    /* Collect entropy from RDRAND if available */
+    for (int r = 0; r < 4 && si < 64; r++) {
+        uint64_t rv;
+        if (try_rdrand64(&rv)) {
+            for (int b = 0; b < 8 && si < 64; b++)
+                seed[si++] = (uint8_t)(rv >> (b * 8));
+        }
+    }
+
+    /* Fill remaining with timer ticks (varied calls for jitter) */
+    while (si < 64) {
+        uint64_t t = timer_get_ticks();
+        seed[si++] = (uint8_t)(t ^ (t >> 7) ^ (t >> 19));
+    }
+
+    /* Hash seed material into the key */
+    sha256(seed, 64, prng_key);
+    prng_counter = timer_get_ticks() ^ 0xA5A5A5A5DEADBEEFULL;
+    if (prng_counter == 0) prng_counter = 1;
+    prng_seeded = 1;
+}
+
+static void prng_generate(uint8_t *out, int len)
+{
+    if (!prng_seeded) prng_seed();
+
+    while (len > 0) {
+        /* Input = key(32) || counter(8) */
+        uint8_t input[40];
+        for (int i = 0; i < 32; i++) input[i] = prng_key[i];
+        for (int i = 0; i < 8; i++)
+            input[32 + i] = (uint8_t)(prng_counter >> (56 - 8 * i));
+
+        /* Generate one block of output */
+        uint8_t block[32];
+        sha256(input, 40, block);
+        prng_counter++;
+
+        int chunk = (len < 32) ? len : 32;
+        for (int i = 0; i < chunk; i++) out[i] = block[i];
+        out += chunk;
+        len -= chunk;
+
+        /* Re-key: key = SHA-256(key || block) */
+        uint8_t rekey[64];
+        for (int i = 0; i < 32; i++) rekey[i] = prng_key[i];
+        for (int i = 0; i < 32; i++) rekey[32 + i] = block[i];
+        sha256(rekey, 64, prng_key);
+    }
+}
+
 uint32_t tls_random(void)
 {
-    static uint32_t s0 = 0x5A5A5A5A;
-    static uint32_t s1 = 0xA5A5A5A5;
-    static int seeded = 0;
-    if (!seeded) {
-        s0 ^= (uint32_t)timer_get_ticks();
-        s1 ^= (uint32_t)(timer_get_ticks() >> 16) ^ 0xDEADBEEF;
-        seeded = 1;
-    }
-    /* xorshift64 style with timer entropy mixing */
-    s0 ^= s0 << 13;
-    s0 ^= s0 >> 17;
-    s0 ^= s0 << 5;
-    s1 ^= (uint32_t)timer_get_ticks();
-    s1 = s1 * 1103515245 + 12345;
-    return s0 + s1;
+    uint8_t b[4];
+    prng_generate(b, 4);
+    return ((uint32_t)b[0] << 24) | ((uint32_t)b[1] << 16) |
+           ((uint32_t)b[2] << 8)  | (uint32_t)b[3];
 }
 
 void tls_random_bytes(uint8_t *buf, int len)
 {
-    for (int i = 0; i < len; i++)
-        buf[i] = (uint8_t)(tls_random() & 0xFF);
+    if (buf == 0 || len <= 0) return;
+    prng_generate(buf, len);
 }
