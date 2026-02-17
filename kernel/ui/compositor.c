@@ -996,33 +996,8 @@ void compositor_handle_mouse(int mx, int my, int buttons)
             start_menu_open = 0;
         }
 
-        /* Desktop icon hit test (double-click to open, single click to select) */
-        for (int i = 0; i < DESKTOP_ICON_COUNT; i++) {
-            int ix = ICON_START_X;
-            int iy = ICON_START_Y + i * (ICON_H + ICON_LABEL_GAP);
-            if (mx >= ix - 4 && mx < ix + ICON_W + 4 &&
-                my >= iy - 4 && my < iy + ICON_H + 24) {
-                uint64_t now = timer_get_ticks();
-                if (last_icon_click_idx == i &&
-                    (now - last_icon_click_tick) < DBLCLICK_MS) {
-                    selected_icon = -1;
-                    last_icon_click_idx = -1;
-                    if (start_menu_callback)
-                        start_menu_callback(i);
-                } else {
-                    selected_icon = i;
-                    last_icon_click_tick = now;
-                    last_icon_click_idx = i;
-                }
-                compositor_draw_cursor(mx, my);
-                return;
-            }
-        }
-
-        /* Click on empty desktop deselects icons */
-        selected_icon = -1;
-
-        /* Window hit-test: use z-order-aware helper */
+        /* Window hit-test: use z-order-aware helper (before desktop icons
+         * so clicks cannot pass through windows onto the desktop) */
         window_t *w = window_at(mx, my);
         if (w) {
             int btn_y_center = w->y + TITLEBAR_H / 2;
@@ -1071,11 +1046,13 @@ void compositor_handle_mouse(int mx, int my, int buttons)
                 return;
             }
 
-            /* Title bar drag */
+            /* Title bar drag (disabled when maximized) */
             if (my >= w->y && my < w->y + TITLEBAR_H) {
-                w->dragging = 1;
-                w->drag_ox = mx - w->x;
-                w->drag_oy = my - w->y;
+                if (!w->maximized) {
+                    w->dragging = 1;
+                    w->drag_ox = mx - w->x;
+                    w->drag_oy = my - w->y;
+                }
                 for (int j = 0; j < MAX_WINDOWS; j++)
                     windows[j].focused = 0;
                 w->focused = 1;
@@ -1098,6 +1075,33 @@ void compositor_handle_mouse(int mx, int my, int buttons)
                 return;
             }
         }
+
+        /* Desktop icon hit test (double-click to open, single click to select)
+         * Only reached when no window is under the cursor */
+        for (int i = 0; i < DESKTOP_ICON_COUNT; i++) {
+            int ix = ICON_START_X;
+            int iy = ICON_START_Y + i * (ICON_H + ICON_LABEL_GAP);
+            if (mx >= ix - 4 && mx < ix + ICON_W + 4 &&
+                my >= iy - 4 && my < iy + ICON_H + 24) {
+                uint64_t now = timer_get_ticks();
+                if (last_icon_click_idx == i &&
+                    (now - last_icon_click_tick) < DBLCLICK_MS) {
+                    selected_icon = -1;
+                    last_icon_click_idx = -1;
+                    if (start_menu_callback)
+                        start_menu_callback(i);
+                } else {
+                    selected_icon = i;
+                    last_icon_click_tick = now;
+                    last_icon_click_idx = i;
+                }
+                compositor_draw_cursor(mx, my);
+                return;
+            }
+        }
+
+        /* Click on empty desktop deselects icons */
+        selected_icon = -1;
     }
 
     /* Right-click: forward to window under cursor */
