@@ -12,6 +12,7 @@
 #include "kernel/gfx/framebuffer.h"
 #include "kernel/fs/vfs.h"
 #include "kernel/mem/heap.h"
+#include "kernel/drivers/keyboard.h"
 
 /* ── Text buffer ──────────────────────────────────────────────────────── */
 #define TEXT_MAX    8192
@@ -31,6 +32,8 @@ static int       dialog_input_len = 0;
 static int       np_scrollbar_dragging = 0;
 static int       np_scrollbar_drag_offset = 0;
 static int       modified = 0;  /* Track unsaved changes */
+static int       select_all_active = 0;       /* Text select-all flag */
+static int       dialog_select_all = 0;       /* Dialog input select-all flag */
 
 /* ── Skeuomorphic colours ─────────────────────────────────────────────── */
 #define COL_PAPER      0xFFF8C8   /* Legal pad yellow */
@@ -590,27 +593,56 @@ static void notepad_key(window_t *win, char ascii, int scancode, int pressed)
 {
     (void)win;
     if (!pressed) return;
+    int ctrl = keyboard_ctrl_held();
 
     /* Dialog mode typing */
     if (dialog_mode) {
         if (dialog_mode == 3) return;  /* No typing in unsaved prompt */
+        /* CTRL+A: select all in dialog input */
+        if (ctrl && scancode == 0x1E) {
+            dialog_select_all = 1;
+            return;
+        }
         if (ascii == '\b') {
-            if (dialog_input_len > 0) dialog_input[--dialog_input_len] = 0;
+            if (dialog_select_all) {
+                dialog_input_len = 0;
+                dialog_input[0] = 0;
+                dialog_select_all = 0;
+            } else if (dialog_input_len > 0) {
+                dialog_input[--dialog_input_len] = 0;
+            }
         } else if (ascii == '\n') {
+            dialog_select_all = 0;
             dialog_input[dialog_input_len] = 0;
             if (dialog_mode == 1) load_file(dialog_input);
             else if (dialog_mode == 2) save_file(dialog_input);
             dialog_mode = 0;
         } else if (ascii >= 32 && dialog_input_len < MAX_PATH - 1) {
+            if (dialog_select_all) {
+                dialog_input_len = 0;
+                dialog_select_all = 0;
+            }
             dialog_input[dialog_input_len++] = ascii;
             dialog_input[dialog_input_len] = 0;
         }
         return;
     }
 
+    /* CTRL+A: select all text */
+    if (ctrl && scancode == 0x1E) {
+        select_all_active = 1;
+        return;
+    }
+
     /* Backspace */
     if (ascii == '\b') {
-        if (cursor_pos > 0) {
+        if (select_all_active) {
+            text_len = 0;
+            cursor_pos = 0;
+            text_buf[0] = 0;
+            select_all_active = 0;
+            modified = 1;
+        } else if (cursor_pos > 0) {
             for (int i = cursor_pos - 1; i < text_len - 1; i++)
                 text_buf[i] = text_buf[i + 1];
             text_len--;
@@ -619,6 +651,10 @@ static void notepad_key(window_t *win, char ascii, int scancode, int pressed)
         }
         return;
     }
+
+    /* Arrow keys clear selection */
+    if (scancode == 0x4B || scancode == 0x4D || scancode == 0x48 || scancode == 0x50)
+        select_all_active = 0;
 
     /* Arrow keys (scan codes) */
     if (scancode == 0x4B && cursor_pos > 0) { cursor_pos--; return; }         /* Left  */
@@ -654,6 +690,11 @@ static void notepad_key(window_t *win, char ascii, int scancode, int pressed)
 
     /* Normal character insertion */
     if (ascii >= 32 || ascii == '\n' || ascii == '\t') {
+        if (select_all_active) {
+            text_len = 0;
+            cursor_pos = 0;
+            select_all_active = 0;
+        }
         if (text_len < TEXT_MAX - 1) {
             for (int i = text_len; i > cursor_pos; i--)
                 text_buf[i] = text_buf[i - 1];

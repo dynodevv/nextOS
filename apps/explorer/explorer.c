@@ -12,6 +12,7 @@
 #include "kernel/mem/heap.h"
 #include "apps/notepad/notepad.h"
 #include "kernel/drivers/timer.h"
+#include "kernel/drivers/keyboard.h"
 
 /* ── State ────────────────────────────────────────────────────────────── */
 #define MAX_ENTRIES  128
@@ -52,6 +53,7 @@ static int         rename_dialog_active = 0;
 static int         rename_target_index = -1;
 static char        rename_input[VFS_MAX_NAME] = "";
 static int         rename_input_len = 0;
+static int         rename_select_all = 0;
 
 /* Sidebar quick-access folders */
 typedef struct { const char *label; const char *path; } sidebar_item_t;
@@ -823,9 +825,22 @@ static void explorer_key(window_t *win, char ascii, int scancode, int pressed)
 
     /* Rename dialog typing */
     if (rename_dialog_active) {
+        int ctrl = keyboard_ctrl_held();
+        /* CTRL+A: select all in rename input */
+        if (ctrl && scancode == 0x1E) {
+            rename_select_all = 1;
+            return;
+        }
         if (ascii == '\b') {
-            if (rename_input_len > 0) rename_input[--rename_input_len] = 0;
+            if (rename_select_all) {
+                rename_input_len = 0;
+                rename_input[0] = 0;
+                rename_select_all = 0;
+            } else if (rename_input_len > 0) {
+                rename_input[--rename_input_len] = 0;
+            }
         } else if (ascii == '\n') {
+            rename_select_all = 0;
             /* Confirm rename */
             if (rename_input_len > 0 && rename_target_index >= 0) {
                 char old_path[PATH_MAX_LEN];
@@ -844,8 +859,13 @@ static void explorer_key(window_t *win, char ascii, int scancode, int pressed)
             rename_dialog_active = 0;
         } else if (ascii == 27) {
             /* Escape = cancel */
+            rename_select_all = 0;
             rename_dialog_active = 0;
         } else if (ascii >= 32 && rename_input_len < VFS_MAX_NAME - 1) {
+            if (rename_select_all) {
+                rename_input_len = 0;
+                rename_select_all = 0;
+            }
             rename_input[rename_input_len++] = ascii;
             rename_input[rename_input_len] = 0;
         }

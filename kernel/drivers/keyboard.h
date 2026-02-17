@@ -56,5 +56,8 @@ void         keyboard_set_layout(kb_layout_t layout);
 kb_layout_t  keyboard_get_layout(void);
 const char  *keyboard_layout_name(kb_layout_t layout);
 int          keyboard_poll(key_event_t *event);
+int          keyboard_ctrl_held(void);
+int          keyboard_shift_held(void);
+int          keyboard_alt_held(void);
 
 #endif /* NEXTOS_KEYBOARD_H */
