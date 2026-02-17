@@ -919,7 +919,7 @@ static uint32_t named_color(const char *name)
     if (len == 8 && str_ncasecmp(name, "darkgrey", 8) == 0) return 0xA9A9A9;
     if (len == 8 && str_ncasecmp(name, "deeppink", 8) == 0) return 0xFF1493;
     if (len == 8 && str_ncasecmp(name, "honeydew", 8) == 0) return 0xF0FFF0;
-    if (len == 8 && str_ncasecmp(name, "hotpink", 7) == 0) return 0xFF69B4;
+    if (len == 7 && str_ncasecmp(name, "hotpink", 7) == 0) return 0xFF69B4;
     if (len == 8 && str_ncasecmp(name, "lavender", 8) == 0) return 0xE6E6FA;
     if (len == 8 && str_ncasecmp(name, "moccasin", 8) == 0) return 0xFFE4B5;
     if (len == 8 && str_ncasecmp(name, "seagreen", 8) == 0) return 0x2E8B57;
@@ -964,7 +964,7 @@ static uint32_t named_color(const char *name)
     if (len == 10 && str_ncasecmp(name, "powderblue", 10) == 0) return 0xB0E0E6;
     if (len == 10 && str_ncasecmp(name, "sandybrown", 10) == 0) return 0xF4A460;
     if (len == 10 && str_ncasecmp(name, "whitesmoke", 10) == 0) return 0xF5F5F5;
-    if (len == 11 && str_ncasecmp(name, "aliceblue", 9) == 0) return 0xF0F8FF;
+    if (len == 9 && str_ncasecmp(name, "aliceblue", 9) == 0) return 0xF0F8FF;
     if (len == 11 && str_ncasecmp(name, "deepskyblue", 11) == 0) return 0x00BFFF;
     if (len == 11 && str_ncasecmp(name, "floralwhite", 11) == 0) return 0xFFFAF0;
     if (len == 11 && str_ncasecmp(name, "forestgreen", 11) == 0) return 0x228B22;
@@ -974,8 +974,8 @@ static uint32_t named_color(const char *name)
     if (len == 12 && str_ncasecmp(name, "antiquewhite", 12) == 0) return 0xFAEBD7;
     if (len == 12 && str_ncasecmp(name, "darkseagreen", 12) == 0) return 0x8FBC8F;
     if (len == 12 && str_ncasecmp(name, "lemonchiffon", 12) == 0) return 0xFFFACD;
-    if (len == 12 && str_ncasecmp(name, "lightyellow", 11) == 0) return 0xFFFFE0;
-    if (len == 12 && str_ncasecmp(name, "lightsalmon", 11) == 0) return 0xFFA07A;
+    if (len == 11 && str_ncasecmp(name, "lightyellow", 11) == 0) return 0xFFFFE0;
+    if (len == 11 && str_ncasecmp(name, "lightsalmon", 11) == 0) return 0xFFA07A;
     if (len == 12 && str_ncasecmp(name, "mediumorchid", 12) == 0) return 0xBA55D3;
     if (len == 12 && str_ncasecmp(name, "mediumpurple", 12) == 0) return 0x9370DB;
     if (len == 13 && str_ncasecmp(name, "darkgoldenrod", 13) == 0) return 0xB8860B;
@@ -992,7 +992,7 @@ static uint32_t named_color(const char *name)
     if (len == 14 && str_ncasecmp(name, "darkolivegreen", 14) == 0) return 0x556B2F;
     if (len == 14 && str_ncasecmp(name, "lightslategray", 14) == 0) return 0x778899;
     if (len == 14 && str_ncasecmp(name, "lightsteelblue", 14) == 0) return 0xB0C4DE;
-    if (len == 15 && str_ncasecmp(name, "mediumseagreen", 14) == 0) return 0x3CB371;
+    if (len == 14 && str_ncasecmp(name, "mediumseagreen", 14) == 0) return 0x3CB371;
     if (len == 15 && str_ncasecmp(name, "mediumslateblue", 15) == 0) return 0x7B68EE;
     if (len == 16 && str_ncasecmp(name, "mediumaquamarine", 16) == 0) return 0x66CDAA;
     if (len == 17 && str_ncasecmp(name, "mediumspringgreen", 17) == 0) return 0x00FA9A;
@@ -1868,12 +1868,12 @@ static void handle_tag(const char *tag, int tag_len)
             char size_val[8];
             if (get_attr(tag, tag_len, "size", size_val, sizeof(size_val))) {
                 int sz = 0;
-                int si2 = 0;
+                int spos = 0;
                 int relative = 0;
-                if (size_val[0] == '+') { relative = 1; si2 = 1; }
-                else if (size_val[0] == '-') { relative = -1; si2 = 1; }
-                while (size_val[si2] >= '0' && size_val[si2] <= '9')
-                    sz = sz * 10 + (size_val[si2++] - '0');
+                if (size_val[0] == '+') { relative = 1; spos = 1; }
+                else if (size_val[0] == '-') { relative = -1; spos = 1; }
+                while (size_val[spos] >= '0' && size_val[spos] <= '9')
+                    sz = sz * 10 + (size_val[spos++] - '0');
                 if (relative == 1) sz += 3;
                 else if (relative == -1) sz = 3 - sz;
                 /* Map font size to visual effects */
