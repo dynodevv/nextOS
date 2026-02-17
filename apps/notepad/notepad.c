@@ -49,6 +49,8 @@ static int       dialog_select_all = 0;       /* Dialog input select-all flag */
 #define COL_DIALOG_BG  0xE8E0D0
 #define COL_DIALOG_BRD 0x8B7D6B
 #define COL_INPUT_BG   0xFFFFF0
+#define COL_SELECT_BG  0x3399FF   /* Selection highlight blue */
+#define COL_SELECT_TXT 0xFFFFFF   /* White text on selection */
 
 /* ── Canvas font renderer ─────────────────────────────────────────────── */
 extern const uint8_t font_8x16[95][16];
@@ -159,6 +161,7 @@ static void draw_text_area(uint32_t *canvas, int cw, int ch)
     int text_y_start = 36;
     int line = 0;
     int col = 0;
+    uint32_t text_color = select_all_active ? COL_SELECT_TXT : COL_TEXT_COL;
 
     for (int i = 0; i <= text_len; i++) {
         int screen_y = text_y_start + line * LINE_HEIGHT - scroll_y;
@@ -172,15 +175,26 @@ static void draw_text_area(uint32_t *canvas, int cw, int ch)
         if (i >= text_len) break;
 
         if (text_buf[i] == '\n') {
+            /* Selection highlight for trailing newline area */
+            if (select_all_active && screen_y >= text_y_start && screen_y < ch - 4) {
+                fill_rect(canvas, cw, ch, text_x + col * CHAR_WIDTH,
+                          screen_y, CHAR_WIDTH, LINE_HEIGHT, COL_SELECT_BG);
+            }
             line++;
             col = 0;
         } else {
             /* Render character glyph into canvas */
             if (screen_y >= text_y_start && screen_y < ch - 4 &&
                 text_x + col * CHAR_WIDTH < cw - 4) {
+                /* Draw selection background behind character */
+                if (select_all_active) {
+                    fill_rect(canvas, cw, ch,
+                              text_x + col * CHAR_WIDTH, screen_y,
+                              CHAR_WIDTH, LINE_HEIGHT, COL_SELECT_BG);
+                }
                 canvas_draw_char(canvas, cw, ch,
                                  text_x + col * CHAR_WIDTH, screen_y,
-                                 text_buf[i], COL_TEXT_COL);
+                                 text_buf[i], text_color);
             }
             col++;
         }
@@ -252,9 +266,13 @@ static void draw_dialog(uint32_t *canvas, int cw, int ch)
     canvas_draw_string(canvas, cw, ch, dx + 20, dy + 28, "(in /Documents/)", 0x808080);
 
     /* Input field */
-    fill_rect(canvas, cw, ch, dx + 20, dy + 44, dw - 40, 24, COL_INPUT_BG);
-    /* Draw current input text */
-    canvas_draw_string(canvas, cw, ch, dx + 24, dy + 48, dialog_input, 0x1A1A1A);
+    if (dialog_select_all && dialog_input_len > 0) {
+        fill_rect(canvas, cw, ch, dx + 20, dy + 44, dw - 40, 24, COL_SELECT_BG);
+        canvas_draw_string(canvas, cw, ch, dx + 24, dy + 48, dialog_input, COL_SELECT_TXT);
+    } else {
+        fill_rect(canvas, cw, ch, dx + 20, dy + 44, dw - 40, 24, COL_INPUT_BG);
+        canvas_draw_string(canvas, cw, ch, dx + 24, dy + 48, dialog_input, 0x1A1A1A);
+    }
 
     /* OK button */
     draw_gradient(canvas, cw, ch, dx + dw - 80, dy + dh - 36, 60, 24,

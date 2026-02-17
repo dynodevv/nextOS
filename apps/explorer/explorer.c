@@ -449,7 +449,13 @@ static void explorer_paint(window_t *win)
         /* Title */
         canvas_draw_string(win->canvas, cw, ch, dx + 10, dy + 8, "Rename:", COL_TEXT);
         /* Input field */
-        fill_rect(win->canvas, cw, ch, dx + 10, dy + 28, dw - 20, 22, 0xFFFFF0);
+        if (rename_select_all && rename_input_len > 0) {
+            fill_rect(win->canvas, cw, ch, dx + 10, dy + 28, dw - 20, 22, 0x3399FF);
+            canvas_draw_string(win->canvas, cw, ch, dx + 14, dy + 31, rename_input, 0xFFFFFF);
+        } else {
+            fill_rect(win->canvas, cw, ch, dx + 10, dy + 28, dw - 20, 22, 0xFFFFF0);
+            canvas_draw_string(win->canvas, cw, ch, dx + 14, dy + 31, rename_input, 0x1A1A1A);
+        }
         /* Input border */
         for (int i = dx + 10; i < dx + dw - 10; i++) {
             win->canvas[(dy + 28) * cw + i] = 0x807060;
@@ -459,7 +465,6 @@ static void explorer_paint(window_t *win)
             win->canvas[i * cw + dx + 10] = 0x807060;
             win->canvas[i * cw + dx + dw - 11] = 0x807060;
         }
-        canvas_draw_string(win->canvas, cw, ch, dx + 14, dy + 31, rename_input, 0x1A1A1A);
         /* OK / Cancel buttons */
         fill_rect(win->canvas, cw, ch, dx + dw - 140, dy + dh - 28, 60, 22, 0xD8D0C0);
         canvas_draw_string(win->canvas, cw, ch, dx + dw - 128, dy + dh - 24, "OK", COL_TEXT);

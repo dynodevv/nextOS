@@ -72,7 +72,8 @@ process_packet:
     state.buttons = mouse_bytes[0] & 0x07;
     state.dx = (int)mouse_bytes[1] * mouse_speed / 5;
     state.dy = (-(int)mouse_bytes[2]) * mouse_speed / 5;
-    state.scroll = has_scroll_wheel ? (int)mouse_bytes[3] : 0;
+    if (has_scroll_wheel)
+        state.scroll += (int)mouse_bytes[3];
 
     state.x += state.dx;
     state.y += state.dy;

@@ -1597,10 +1597,12 @@ static void handle_tag(const char *tag, int tag_len)
                     /* Display value or placeholder */
                     const char *txt;
                     uint32_t txt_color;
+                    int show_input_sel = (is_focused && input_select_all &&
+                                         fi_idx >= 0 && form_inputs[fi_idx].value[0]);
                     /* Always show the current stored value (which includes user-typed text) */
                     if (fi_idx >= 0 && form_inputs[fi_idx].value[0]) {
                         txt = form_inputs[fi_idx].value;
-                        txt_color = 0x1A1A1A;
+                        txt_color = show_input_sel ? 0xFFFFFF : 0x1A1A1A;
                     } else if (placeholder[0]) {
                         txt = placeholder;
                         txt_color = 0xA0A0A0;
@@ -1616,6 +1618,10 @@ static void handle_tag(const char *tag, int tag_len)
                         while (txt[ci2] && ci2 < max_txt && ci2 < 79)
                             { clipped[ci2] = txt[ci2]; ci2++; }
                         clipped[ci2] = 0;
+                        /* Selection highlight */
+                        if (show_input_sel)
+                            fill_rect(rs.canvas, rs.cw, rs.ch, rs.x + 2, draw_y + 2,
+                                      ci2 * 8 + 4, 18, 0x3399FF);
                         canvas_draw_string(rs.canvas, rs.cw, rs.ch, rs.x + 4, draw_y + 3,
                                            clipped, txt_color);
                     }
@@ -2986,9 +2992,20 @@ static void browser_paint(window_t *win)
     int start = 0;
     if (url_cursor > max_chars - 2)
         start = url_cursor - max_chars + 2;
-    for (int ci = start; url_bar[ci] && (ci - start) < max_chars; ci++) {
-        canvas_draw_char(win->canvas, cw, ch,
-                         url_x + 4 + (ci - start) * 8, btn_y + 4, url_bar[ci], 0x1A1A1A);
+    /* Selection highlight for URL bar */
+    if (url_select_all && url_bar[0]) {
+        int sel_len = 0;
+        for (int ci = start; url_bar[ci] && (ci - start) < max_chars; ci++) sel_len++;
+        if (sel_len > 0)
+            fill_rect(win->canvas, cw, ch, url_x + 4, btn_y + 2,
+                      sel_len * 8, btn_h - 4, 0x3399FF);
+    }
+    {
+        uint32_t url_text_color = (url_select_all && url_bar[0]) ? 0xFFFFFF : 0x1A1A1A;
+        for (int ci = start; url_bar[ci] && (ci - start) < max_chars; ci++) {
+            canvas_draw_char(win->canvas, cw, ch,
+                             url_x + 4 + (ci - start) * 8, btn_y + 4, url_bar[ci], url_text_color);
+        }
     }
 
     /* Cursor blink */
