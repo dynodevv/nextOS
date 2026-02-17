@@ -132,8 +132,8 @@ static void canvas_draw_char_bold(uint32_t *canvas, int cw, int ch,
 /* ── Browser State ───────────────────────────────────────────────────── */
 static window_t *browser_win = 0;
 
-#define URL_MAX      256
-#define PAGE_BUF_SIZE 32768
+#define URL_MAX      512
+#define PAGE_BUF_SIZE 65536
 #define TITLE_MAX    128
 #define TOOLBAR_H    32
 #define STATUS_H     20
@@ -161,8 +161,8 @@ static link_region_t page_links[MAX_LINKS];
 static int link_count = 0;
 
 /* Form state */
-#define MAX_FORM_INPUTS 16
-#define FORM_INPUT_MAX  128
+#define MAX_FORM_INPUTS 32
+#define FORM_INPUT_MAX  256
 typedef struct {
     int x, y, w, h;                  /* Bounding box in content coords */
     char name[64];                   /* Input name attribute */
@@ -190,19 +190,25 @@ static char saved_focused_name[64]; /* Name of focused input to restore */
 static char hover_url[URL_MAX];
 
 /* CSS style rules parsed from <style> blocks */
-#define MAX_CSS_RULES 32
+#define MAX_CSS_RULES 64
 #define CSS_SELECTOR_MAX 32
 #define CSS_VALUE_MAX 64
 typedef struct {
-    char selector[CSS_SELECTOR_MAX]; /* e.g. "body", "a", "h1" */
+    char selector[CSS_SELECTOR_MAX]; /* e.g. "body", "a", "h1", ".class" */
     uint32_t color;
     int has_color;
     uint32_t bg_color;
     int has_bg_color;
-    int bold;        /* 1=force bold, -1=no change */
+    int bold;        /* 1=force bold, 0=force off, -1=no change */
     int italic;      /* 1=force italic, -1=no change */
     int underline;   /* 1=force underline, -1=no change */
     int text_align;  /* 0=default, 1=left, 2=center, 3=right */
+    int display_none; /* 1=hide element */
+    int font_size;   /* 0=default, 1-7 scale */
+    int margin_left;  /* pixels, -1=no change */
+    int margin_right; /* pixels, -1=no change */
+    int padding_left;
+    int padding_right;
 } css_rule_t;
 static css_rule_t css_rules[MAX_CSS_RULES];
 static int css_rule_count = 0;
@@ -438,27 +444,75 @@ static void parse_css_block(const char *css, int css_len)
             continue;
         }
 
-        /* Read selector */
-        char selector[CSS_SELECTOR_MAX];
+        /* Skip @-rules (like @media, @keyframes, @font-face) */
+        if (css[pos] == '@') {
+            /* Find the matching closing brace */
+            int depth = 0;
+            while (pos < css_len) {
+                if (css[pos] == '{') depth++;
+                else if (css[pos] == '}') {
+                    depth--;
+                    if (depth <= 0) { pos++; break; }
+                }
+                pos++;
+            }
+            continue;
+        }
+
+        /* Collect all selectors (may be comma-separated) */
+        char selectors[8][CSS_SELECTOR_MAX];
+        int sel_count = 0;
         int si = 0;
-        while (pos < css_len && css[pos] != '{' && css[pos] != ',' && si < CSS_SELECTOR_MAX - 1) {
+
+        while (pos < css_len && css[pos] != '{') {
             char c = css[pos];
+            if (c == ',') {
+                /* End current selector, start next */
+                while (si > 0 && selectors[sel_count][si-1] == ' ') si--;
+                selectors[sel_count][si] = 0;
+                if (si > 0 && sel_count < 7) sel_count++;
+                si = 0;
+                pos++;
+                css_skip_whitespace(css, &pos, css_len);
+                continue;
+            }
             if (c >= 'A' && c <= 'Z') c += 32;
-            if (c != ' ' && c != '\t' && c != '\n' && c != '\r')
-                selector[si++] = c;
+            /* For complex selectors (e.g. "div p"), keep only last part */
+            if ((c == ' ' || c == '\t' || c == '\n' || c == '\r') && si > 0) {
+                /* If next non-whitespace is a letter/dot/hash, treat as descendant */
+                int save = pos + 1;
+                while (save < css_len && (css[save] == ' ' || css[save] == '\t' ||
+                       css[save] == '\n' || css[save] == '\r')) save++;
+                if (save < css_len && css[save] != '{' && css[save] != ',') {
+                    /* Descendant selector: restart with the last part */
+                    si = 0;
+                    pos = save;
+                    continue;
+                }
+            }
+            if (c != ' ' && c != '\t' && c != '\n' && c != '\r' && si < CSS_SELECTOR_MAX - 1) {
+                /* Skip pseudo-classes and pseudo-elements */
+                if (c == ':') {
+                    while (pos < css_len && css[pos] != '{' && css[pos] != ',') pos++;
+                    continue;
+                }
+                /* Handle attribute selectors - skip */
+                if (c == '[') {
+                    while (pos < css_len && css[pos] != ']') pos++;
+                    if (pos < css_len) pos++;
+                    continue;
+                }
+                /* Skip combinator chars but keep . and # */
+                if (c == '+' || c == '>' || c == '~') { pos++; continue; }
+                selectors[sel_count][si++] = c;
+            }
             pos++;
         }
-        selector[si] = 0;
+        /* Finalize last selector */
+        while (si > 0 && selectors[sel_count][si-1] == ' ') si--;
+        selectors[sel_count][si] = 0;
+        if (si > 0) sel_count++;
 
-        /* Skip complex selectors with . # : [ + > ~ */
-        int skip_rule = 0;
-        for (int i = 0; selector[i]; i++) {
-            if (selector[i] == '.' || selector[i] == '#' || selector[i] == ':' ||
-                selector[i] == '[' || selector[i] == '+' || selector[i] == '>' ||
-                selector[i] == '~') { skip_rule = 1; break; }
-        }
-
-        if (css[pos] == ',') { pos++; continue; } /* Multi-selector: skip */
         if (pos >= css_len || css[pos] != '{') continue;
         pos++; /* Skip { */
 
@@ -472,21 +526,34 @@ static void parse_css_block(const char *css, int css_len)
         }
         int decl_end = pos - 1;
 
-        if (skip_rule || !selector[0]) continue;
+        if (sel_count == 0) continue;
 
-        css_rule_t *rule = &css_rules[css_rule_count];
-        str_cpy(rule->selector, selector);
-        rule->has_color = 0;
-        rule->has_bg_color = 0;
-        rule->bold = -1;
-        rule->italic = -1;
-        rule->underline = -1;
-        rule->text_align = 0;
+        /* Parse properties once, then create rule for each selector */
+        css_rule_t parsed;
+        parsed.has_color = 0;
+        parsed.has_bg_color = 0;
+        parsed.bold = -1;
+        parsed.italic = -1;
+        parsed.underline = -1;
+        parsed.text_align = 0;
+        parsed.display_none = 0;
+        parsed.font_size = 0;
+        parsed.margin_left = -1;
+        parsed.margin_right = -1;
+        parsed.padding_left = 0;
+        parsed.padding_right = 0;
 
         /* Parse declarations */
         int dp = decl_start;
         while (dp < decl_end) {
             css_skip_whitespace(css, &dp, decl_end);
+            /* Skip comments inside declarations */
+            if (dp + 1 < decl_end && css[dp] == '/' && css[dp+1] == '*') {
+                dp += 2;
+                while (dp + 1 < decl_end && !(css[dp] == '*' && css[dp+1] == '/')) dp++;
+                if (dp + 1 < decl_end) dp += 2;
+                continue;
+            }
             /* Read property name */
             char prop[32];
             int pi = 0;
@@ -507,40 +574,120 @@ static void parse_css_block(const char *css, int css_len)
             while (dp < decl_end && css[dp] != ';' && css[dp] != '}' && vi < CSS_VALUE_MAX - 1) {
                 val[vi++] = css[dp++];
             }
-            /* Trim trailing whitespace */
+            /* Trim trailing whitespace and !important */
             while (vi > 0 && (val[vi-1] == ' ' || val[vi-1] == '\t' ||
                    val[vi-1] == '\n' || val[vi-1] == '\r')) vi--;
             val[vi] = 0;
+            /* Strip !important */
+            if (vi > 10 && str_ncasecmp(val + vi - 10, "!important", 10) == 0) {
+                vi -= 10;
+                while (vi > 0 && val[vi-1] == ' ') vi--;
+                val[vi] = 0;
+            }
             if (dp < decl_end && css[dp] == ';') dp++;
 
             /* Apply property */
             if (str_cmp(prop, "color") == 0) {
-                rule->color = named_color(val);
-                rule->has_color = 1;
+                uint32_t c = named_color(val);
+                if (c != 0xFFFFFF || str_ncasecmp(val, "white", 5) == 0 || val[0] == '#' ||
+                    str_ncasecmp(val, "rgb", 3) == 0) {
+                    parsed.color = c;
+                    parsed.has_color = 1;
+                }
             } else if (str_cmp(prop, "background-color") == 0 || str_cmp(prop, "background") == 0) {
-                rule->bg_color = named_color(val);
-                rule->has_bg_color = 1;
+                /* Only parse if it looks like a color value, not url() etc */
+                if (str_ncasecmp(val, "url", 3) != 0) {
+                    uint32_t c = named_color(val);
+                    if (c != 0xFFFFFF || str_ncasecmp(val, "white", 5) == 0 ||
+                        val[0] == '#' || str_ncasecmp(val, "rgb", 3) == 0) {
+                        parsed.bg_color = c;
+                        parsed.has_bg_color = 1;
+                    }
+                }
             } else if (str_cmp(prop, "font-weight") == 0) {
-                if (str_ncasecmp(val, "bold", 4) == 0) rule->bold = 1;
-                else if (str_ncasecmp(val, "normal", 6) == 0) rule->bold = 0;
-                /* Ignore unrecognized values (leave as -1 / no change) */
+                if (str_ncasecmp(val, "bold", 4) == 0) parsed.bold = 1;
+                else if (str_ncasecmp(val, "normal", 6) == 0) parsed.bold = 0;
+                else {
+                    /* Numeric weight: 700+ is bold */
+                    int w = 0;
+                    for (int j = 0; val[j] >= '0' && val[j] <= '9'; j++)
+                        w = w * 10 + (val[j] - '0');
+                    if (w >= 700) parsed.bold = 1;
+                    else if (w > 0) parsed.bold = 0;
+                }
             } else if (str_cmp(prop, "font-style") == 0) {
-                if (str_ncasecmp(val, "italic", 6) == 0) rule->italic = 1;
-                else if (str_ncasecmp(val, "normal", 6) == 0) rule->italic = 0;
+                if (str_ncasecmp(val, "italic", 6) == 0 || str_ncasecmp(val, "oblique", 7) == 0)
+                    parsed.italic = 1;
+                else if (str_ncasecmp(val, "normal", 6) == 0) parsed.italic = 0;
             } else if (str_cmp(prop, "text-decoration") == 0) {
-                if (str_ncasecmp(val, "underline", 9) == 0) rule->underline = 1;
-                else if (str_ncasecmp(val, "none", 4) == 0) rule->underline = 0;
+                if (str_ncasecmp(val, "underline", 9) == 0) parsed.underline = 1;
+                else if (str_ncasecmp(val, "none", 4) == 0) parsed.underline = 0;
             } else if (str_cmp(prop, "text-align") == 0) {
-                if (str_ncasecmp(val, "center", 6) == 0) rule->text_align = 2;
-                else if (str_ncasecmp(val, "right", 5) == 0) rule->text_align = 3;
-                else if (str_ncasecmp(val, "left", 4) == 0) rule->text_align = 1;
+                if (str_ncasecmp(val, "center", 6) == 0) parsed.text_align = 2;
+                else if (str_ncasecmp(val, "right", 5) == 0) parsed.text_align = 3;
+                else if (str_ncasecmp(val, "left", 4) == 0) parsed.text_align = 1;
+            } else if (str_cmp(prop, "display") == 0) {
+                if (str_ncasecmp(val, "none", 4) == 0) parsed.display_none = 1;
+            } else if (str_cmp(prop, "font-size") == 0) {
+                if (str_ncasecmp(val, "xx-small", 8) == 0) parsed.font_size = 1;
+                else if (str_ncasecmp(val, "x-small", 7) == 0) parsed.font_size = 1;
+                else if (str_ncasecmp(val, "small", 5) == 0) parsed.font_size = 2;
+                else if (str_ncasecmp(val, "medium", 6) == 0) parsed.font_size = 3;
+                else if (str_ncasecmp(val, "large", 5) == 0) parsed.font_size = 4;
+                else if (str_ncasecmp(val, "x-large", 7) == 0) parsed.font_size = 5;
+                else if (str_ncasecmp(val, "xx-large", 8) == 0) parsed.font_size = 6;
+                else {
+                    /* Try numeric px value */
+                    int px = 0;
+                    for (int j = 0; val[j] >= '0' && val[j] <= '9'; j++)
+                        px = px * 10 + (val[j] - '0');
+                    if (px <= 10) parsed.font_size = 1;
+                    else if (px <= 13) parsed.font_size = 2;
+                    else if (px <= 16) parsed.font_size = 3;
+                    else if (px <= 20) parsed.font_size = 4;
+                    else if (px <= 26) parsed.font_size = 5;
+                    else if (px > 26) parsed.font_size = 6;
+                }
+            } else if (str_cmp(prop, "margin-left") == 0 || str_cmp(prop, "padding-left") == 0) {
+                int px = 0;
+                for (int j = 0; val[j] >= '0' && val[j] <= '9'; j++)
+                    px = px * 10 + (val[j] - '0');
+                if (str_cmp(prop, "margin-left") == 0) parsed.margin_left = px;
+                else parsed.padding_left = px;
+            } else if (str_cmp(prop, "margin-right") == 0 || str_cmp(prop, "padding-right") == 0) {
+                int px = 0;
+                for (int j = 0; val[j] >= '0' && val[j] <= '9'; j++)
+                    px = px * 10 + (val[j] - '0');
+                if (str_cmp(prop, "margin-right") == 0) parsed.margin_right = px;
+                else parsed.padding_right = px;
+            } else if (str_cmp(prop, "margin") == 0) {
+                /* Simple: parse first number as uniform margin */
+                int px = 0;
+                int j = 0;
+                while (val[j] && (val[j] < '0' || val[j] > '9') && val[j] != '-') j++;
+                while (val[j] >= '0' && val[j] <= '9') { px = px * 10 + (val[j] - '0'); j++; }
+                if (px > 0) { parsed.margin_left = px; parsed.margin_right = px; }
+            } else if (str_cmp(prop, "padding") == 0) {
+                int px = 0;
+                int j = 0;
+                while (val[j] && (val[j] < '0' || val[j] > '9')) j++;
+                while (val[j] >= '0' && val[j] <= '9') { px = px * 10 + (val[j] - '0'); j++; }
+                if (px > 0) { parsed.padding_left = px; parsed.padding_right = px; }
             }
         }
-        css_rule_count++;
+
+        /* Create a rule for each selector */
+        for (int s = 0; s < sel_count && css_rule_count < MAX_CSS_RULES; s++) {
+            css_rule_t *rule = &css_rules[css_rule_count];
+            *rule = parsed;
+            str_cpy(rule->selector, selectors[s]);
+            css_rule_count++;
+        }
     }
 }
 
-/* Look up a CSS rule for a given tag name and apply it */
+/* Look up a CSS rule for a given tag name and apply it.
+   Also checks class-based rules: .classname matches if tag has class="classname". */
 static css_rule_t *css_lookup(const char *tag_name)
 {
     for (int i = 0; i < css_rule_count; i++) {
@@ -549,6 +696,37 @@ static css_rule_t *css_lookup(const char *tag_name)
     }
     return 0;
 }
+
+/* Look up CSS rule by class name (selector starts with '.') */
+static css_rule_t *css_lookup_class(const char *class_name)
+{
+    if (!class_name || !class_name[0]) return 0;
+    for (int i = 0; i < css_rule_count; i++) {
+        if (css_rules[i].selector[0] == '.') {
+            if (str_ncasecmp(css_rules[i].selector + 1, class_name,
+                str_len(css_rules[i].selector + 1)) == 0)
+                return &css_rules[i];
+        }
+    }
+    return 0;
+}
+
+/* Look up CSS rule by ID (selector starts with '#') */
+static css_rule_t *css_lookup_id(const char *id_name)
+{
+    if (!id_name || !id_name[0]) return 0;
+    for (int i = 0; i < css_rule_count; i++) {
+        if (css_rules[i].selector[0] == '#') {
+            if (str_ncasecmp(css_rules[i].selector + 1, id_name,
+                str_len(css_rules[i].selector + 1)) == 0)
+                return &css_rules[i];
+        }
+    }
+    return 0;
+}
+
+/* Apply a CSS rule to the current render state */
+static void apply_css_rule(css_rule_t *css);  /* Forward declaration */
 
 /* Parse inline style attribute and apply to render state */
 static void apply_inline_style(const char *tag, int tag_len);
@@ -584,21 +762,34 @@ typedef struct {
     int in_list;
     int list_ordered;
     int list_item;
+    int list_depth;        /* Nested list depth */
     int in_title;
     int in_body;
     int in_head;
     int in_style;          /* Inside <style> - skip content */
     int in_script;         /* Inside <script> - skip content */
     int centered;          /* <center> or align=center */
+    int right_align;       /* text-align: right */
+    int display_none;      /* Hidden element depth counter */
     int in_table;
     int in_table_row;
     int table_col;         /* Current column in table row */
     int table_col_x;       /* X position for current table column */
+    int table_width;       /* Table width hint */
 
-    /* Font color/style stack (simplified: 4 levels) */
-#define COLOR_STACK_MAX 4
+    /* Font color/style stack (simplified: 16 levels) */
+#define COLOR_STACK_MAX 16
     uint32_t color_stack[COLOR_STACK_MAX];
     int color_stack_depth;
+
+    /* Style state stack for saving/restoring on block elements */
+#define STYLE_STACK_MAX 8
+    struct {
+        int bold, italic, underline, strikethrough;
+        int centered, right_align;
+        int line_height;
+    } style_stack[STYLE_STACK_MAX];
+    int style_stack_depth;
 
     /* Current link tracking */
     char link_href[URL_MAX];  /* href of current <a> */
@@ -607,13 +798,18 @@ typedef struct {
 
     /* Centering support: accumulate line content for deferred render */
     int center_defer;         /* 1 if we're deferring render for centering */
-#define CENTER_BUF_MAX 256
-    char center_buf[CENTER_BUF_MAX]; /* Buffer for centered line */
+#define CENTER_BUF_MAX 512
+    char center_buf[CENTER_BUF_MAX]; /* Buffer for centered/right-aligned line */
     int center_buf_len;
     int center_line_bold;     /* bold state for centered line */
+    uint32_t center_buf_colors[CENTER_BUF_MAX]; /* per-char color */
+    int center_buf_underline[CENTER_BUF_MAX]; /* per-char underline */
+    int center_buf_strikethrough[CENTER_BUF_MAX]; /* per-char strikethrough */
+    int center_buf_in_link;   /* Track if centered chars are links */
 
-    /* Whitespace suppression after block tags */
+    /* Whitespace tracking */
     int last_was_block;       /* 1 if last element was a block tag (suppress leading space) */
+    int last_char_space;      /* 1 if the last character rendered was a space */
 } render_state_t;
 
 static render_state_t rs;
@@ -635,103 +831,272 @@ static uint32_t parse_html_color(const char *s)
     return val;
 }
 
-/* Named colors */
+/* Named colors - returns parsed color value. Handles hex (#RRGGBB, #RGB), 
+   named colors, and rgb(r,g,b) notation */
 static uint32_t named_color(const char *name)
 {
     if (!name || !name[0]) return 0xFFFFFF;
-    if (str_ncasecmp(name, "white", 5) == 0) return 0xFFFFFF;
-    if (str_ncasecmp(name, "black", 5) == 0) return 0x000000;
-    if (str_ncasecmp(name, "red", 3) == 0) return 0xFF0000;
-    if (str_ncasecmp(name, "green", 5) == 0) return 0x008000;
-    if (str_ncasecmp(name, "blue", 4) == 0) return 0x0000FF;
-    if (str_ncasecmp(name, "yellow", 6) == 0) return 0xFFFF00;
-    if (str_ncasecmp(name, "gray", 4) == 0) return 0x808080;
-    if (str_ncasecmp(name, "grey", 4) == 0) return 0x808080;
-    if (str_ncasecmp(name, "silver", 6) == 0) return 0xC0C0C0;
-    if (str_ncasecmp(name, "navy", 4) == 0) return 0x000080;
-    if (str_ncasecmp(name, "teal", 4) == 0) return 0x008080;
-    if (str_ncasecmp(name, "maroon", 6) == 0) return 0x800000;
-    if (str_ncasecmp(name, "olive", 5) == 0) return 0x808000;
-    if (str_ncasecmp(name, "aqua", 4) == 0) return 0x00FFFF;
-    if (str_ncasecmp(name, "cyan", 4) == 0) return 0x00FFFF;
-    if (str_ncasecmp(name, "fuchsia", 7) == 0) return 0xFF00FF;
-    if (str_ncasecmp(name, "magenta", 7) == 0) return 0xFF00FF;
-    if (str_ncasecmp(name, "lime", 4) == 0) return 0x00FF00;
-    if (str_ncasecmp(name, "purple", 6) == 0) return 0x800080;
-    if (str_ncasecmp(name, "orange", 6) == 0) return 0xFFA500;
-    if (str_ncasecmp(name, "pink", 4) == 0) return 0xFFC0CB;
-    if (str_ncasecmp(name, "brown", 5) == 0) return 0xA52A2A;
-    if (str_ncasecmp(name, "coral", 5) == 0) return 0xFF7F50;
-    if (str_ncasecmp(name, "crimson", 7) == 0) return 0xDC143C;
-    if (str_ncasecmp(name, "darkblue", 8) == 0) return 0x00008B;
-    if (str_ncasecmp(name, "darkred", 7) == 0) return 0x8B0000;
-    if (str_ncasecmp(name, "gold", 4) == 0) return 0xFFD700;
-    if (str_ncasecmp(name, "indigo", 6) == 0) return 0x4B0082;
-    if (str_ncasecmp(name, "ivory", 5) == 0) return 0xFFFFF0;
-    if (str_ncasecmp(name, "khaki", 5) == 0) return 0xF0E68C;
-    if (str_ncasecmp(name, "lavender", 8) == 0) return 0xE6E6FA;
-    if (str_ncasecmp(name, "linen", 5) == 0) return 0xFAF0E6;
-    if (str_ncasecmp(name, "salmon", 6) == 0) return 0xFA8072;
-    if (str_ncasecmp(name, "tan", 3) == 0) return 0xD2B48C;
-    if (str_ncasecmp(name, "tomato", 6) == 0) return 0xFF6347;
-    if (str_ncasecmp(name, "violet", 6) == 0) return 0xEE82EE;
-    if (str_ncasecmp(name, "wheat", 5) == 0) return 0xF5DEB3;
-    if (str_ncasecmp(name, "lightgray", 9) == 0 || str_ncasecmp(name, "lightgrey", 9) == 0) return 0xD3D3D3;
-    if (str_ncasecmp(name, "lightgreen", 10) == 0) return 0x90EE90;
-    if (str_ncasecmp(name, "lightblue", 9) == 0) return 0xADD8E6;
-    if (str_ncasecmp(name, "darkgray", 8) == 0 || str_ncasecmp(name, "darkgrey", 8) == 0) return 0xA9A9A9;
-    if (str_ncasecmp(name, "darkgreen", 9) == 0) return 0x006400;
+
+    /* Strip leading whitespace */
+    while (*name == ' ' || *name == '\t') name++;
+
+    /* Hex color */
     if (name[0] == '#') return parse_html_color(name);
+
+    /* rgb(r,g,b) */
+    if (str_ncasecmp(name, "rgb(", 4) == 0) {
+        int r = 0, g = 0, b = 0;
+        const char *p = name + 4;
+        while (*p == ' ') p++;
+        while (*p >= '0' && *p <= '9') { r = r * 10 + (*p - '0'); p++; }
+        while (*p == ' ' || *p == ',') p++;
+        while (*p >= '0' && *p <= '9') { g = g * 10 + (*p - '0'); p++; }
+        while (*p == ' ' || *p == ',') p++;
+        while (*p >= '0' && *p <= '9') { b = b * 10 + (*p - '0'); p++; }
+        if (r > 255) r = 255;
+        if (g > 255) g = 255;
+        if (b > 255) b = 255;
+        return (r << 16) | (g << 8) | b;
+    }
+
+    /* Named colors - use exact length matching to avoid prefix bugs */
+    int len = str_len(name);
+    /* Strip trailing whitespace/semicolons from length */
+    while (len > 0 && (name[len-1] == ' ' || name[len-1] == ';' ||
+           name[len-1] == '\t' || name[len-1] == '\n')) len--;
+
+    /* CSS Level 1-4 named colors */
+    if (len == 3 && str_ncasecmp(name, "red", 3) == 0) return 0xFF0000;
+    if (len == 3 && str_ncasecmp(name, "tan", 3) == 0) return 0xD2B48C;
+    if (len == 4 && str_ncasecmp(name, "aqua", 4) == 0) return 0x00FFFF;
+    if (len == 4 && str_ncasecmp(name, "blue", 4) == 0) return 0x0000FF;
+    if (len == 4 && str_ncasecmp(name, "cyan", 4) == 0) return 0x00FFFF;
+    if (len == 4 && str_ncasecmp(name, "gold", 4) == 0) return 0xFFD700;
+    if (len == 4 && str_ncasecmp(name, "gray", 4) == 0) return 0x808080;
+    if (len == 4 && str_ncasecmp(name, "grey", 4) == 0) return 0x808080;
+    if (len == 4 && str_ncasecmp(name, "lime", 4) == 0) return 0x00FF00;
+    if (len == 4 && str_ncasecmp(name, "navy", 4) == 0) return 0x000080;
+    if (len == 4 && str_ncasecmp(name, "peru", 4) == 0) return 0xCD853F;
+    if (len == 4 && str_ncasecmp(name, "pink", 4) == 0) return 0xFFC0CB;
+    if (len == 4 && str_ncasecmp(name, "plum", 4) == 0) return 0xDDA0DD;
+    if (len == 4 && str_ncasecmp(name, "snow", 4) == 0) return 0xFFFAFA;
+    if (len == 4 && str_ncasecmp(name, "teal", 4) == 0) return 0x008080;
+    if (len == 5 && str_ncasecmp(name, "azure", 5) == 0) return 0xF0FFFF;
+    if (len == 5 && str_ncasecmp(name, "beige", 5) == 0) return 0xF5F5DC;
+    if (len == 5 && str_ncasecmp(name, "black", 5) == 0) return 0x000000;
+    if (len == 5 && str_ncasecmp(name, "brown", 5) == 0) return 0xA52A2A;
+    if (len == 5 && str_ncasecmp(name, "coral", 5) == 0) return 0xFF7F50;
+    if (len == 5 && str_ncasecmp(name, "green", 5) == 0) return 0x008000;
+    if (len == 5 && str_ncasecmp(name, "ivory", 5) == 0) return 0xFFFFF0;
+    if (len == 5 && str_ncasecmp(name, "khaki", 5) == 0) return 0xF0E68C;
+    if (len == 5 && str_ncasecmp(name, "linen", 5) == 0) return 0xFAF0E6;
+    if (len == 5 && str_ncasecmp(name, "olive", 5) == 0) return 0x808000;
+    if (len == 5 && str_ncasecmp(name, "wheat", 5) == 0) return 0xF5DEB3;
+    if (len == 5 && str_ncasecmp(name, "white", 5) == 0) return 0xFFFFFF;
+    if (len == 6 && str_ncasecmp(name, "bisque", 6) == 0) return 0xFFE4C4;
+    if (len == 6 && str_ncasecmp(name, "indigo", 6) == 0) return 0x4B0082;
+    if (len == 6 && str_ncasecmp(name, "maroon", 6) == 0) return 0x800000;
+    if (len == 6 && str_ncasecmp(name, "orange", 6) == 0) return 0xFFA500;
+    if (len == 6 && str_ncasecmp(name, "orchid", 6) == 0) return 0xDA70D6;
+    if (len == 6 && str_ncasecmp(name, "purple", 6) == 0) return 0x800080;
+    if (len == 6 && str_ncasecmp(name, "salmon", 6) == 0) return 0xFA8072;
+    if (len == 6 && str_ncasecmp(name, "sienna", 6) == 0) return 0xA0522D;
+    if (len == 6 && str_ncasecmp(name, "silver", 6) == 0) return 0xC0C0C0;
+    if (len == 6 && str_ncasecmp(name, "tomato", 6) == 0) return 0xFF6347;
+    if (len == 6 && str_ncasecmp(name, "violet", 6) == 0) return 0xEE82EE;
+    if (len == 6 && str_ncasecmp(name, "yellow", 6) == 0) return 0xFFFF00;
+    if (len == 7 && str_ncasecmp(name, "crimson", 7) == 0) return 0xDC143C;
+    if (len == 7 && str_ncasecmp(name, "darkred", 7) == 0) return 0x8B0000;
+    if (len == 7 && str_ncasecmp(name, "dimgray", 7) == 0) return 0x696969;
+    if (len == 7 && str_ncasecmp(name, "dimgrey", 7) == 0) return 0x696969;
+    if (len == 7 && str_ncasecmp(name, "fuchsia", 7) == 0) return 0xFF00FF;
+    if (len == 7 && str_ncasecmp(name, "magenta", 7) == 0) return 0xFF00FF;
+    if (len == 7 && str_ncasecmp(name, "thistle", 7) == 0) return 0xD8BFD8;
+    if (len == 8 && str_ncasecmp(name, "cornsilk", 8) == 0) return 0xFFF8DC;
+    if (len == 8 && str_ncasecmp(name, "darkblue", 8) == 0) return 0x00008B;
+    if (len == 8 && str_ncasecmp(name, "darkcyan", 8) == 0) return 0x008B8B;
+    if (len == 8 && str_ncasecmp(name, "darkgray", 8) == 0) return 0xA9A9A9;
+    if (len == 8 && str_ncasecmp(name, "darkgrey", 8) == 0) return 0xA9A9A9;
+    if (len == 8 && str_ncasecmp(name, "deeppink", 8) == 0) return 0xFF1493;
+    if (len == 8 && str_ncasecmp(name, "honeydew", 8) == 0) return 0xF0FFF0;
+    if (len == 8 && str_ncasecmp(name, "hotpink", 7) == 0) return 0xFF69B4;
+    if (len == 8 && str_ncasecmp(name, "lavender", 8) == 0) return 0xE6E6FA;
+    if (len == 8 && str_ncasecmp(name, "moccasin", 8) == 0) return 0xFFE4B5;
+    if (len == 8 && str_ncasecmp(name, "seagreen", 8) == 0) return 0x2E8B57;
+    if (len == 8 && str_ncasecmp(name, "seashell", 8) == 0) return 0xFFF5EE;
+    if (len == 9 && str_ncasecmp(name, "cadetblue", 9) == 0) return 0x5F9EA0;
+    if (len == 9 && str_ncasecmp(name, "chocolate", 9) == 0) return 0xD2691E;
+    if (len == 9 && str_ncasecmp(name, "darkgreen", 9) == 0) return 0x006400;
+    if (len == 9 && str_ncasecmp(name, "firebrick", 9) == 0) return 0xB22222;
+    if (len == 9 && str_ncasecmp(name, "gainsboro", 9) == 0) return 0xDCDCDC;
+    if (len == 9 && str_ncasecmp(name, "goldenrod", 9) == 0) return 0xDAA520;
+    if (len == 9 && str_ncasecmp(name, "lightblue", 9) == 0) return 0xADD8E6;
+    if (len == 9 && str_ncasecmp(name, "lightcyan", 9) == 0) return 0xE0FFFF;
+    if (len == 9 && str_ncasecmp(name, "lightgray", 9) == 0) return 0xD3D3D3;
+    if (len == 9 && str_ncasecmp(name, "lightgrey", 9) == 0) return 0xD3D3D3;
+    if (len == 9 && str_ncasecmp(name, "lightpink", 9) == 0) return 0xFFB6C1;
+    if (len == 9 && str_ncasecmp(name, "limegreen", 9) == 0) return 0x32CD32;
+    if (len == 9 && str_ncasecmp(name, "mintcream", 9) == 0) return 0xF5FFFA;
+    if (len == 9 && str_ncasecmp(name, "mistyrose", 9) == 0) return 0xFFE4E1;
+    if (len == 9 && str_ncasecmp(name, "olivedrab", 9) == 0) return 0x6B8E23;
+    if (len == 9 && str_ncasecmp(name, "orangered", 9) == 0) return 0xFF4500;
+    if (len == 9 && str_ncasecmp(name, "palegreen", 9) == 0) return 0x98FB98;
+    if (len == 9 && str_ncasecmp(name, "peachpuff", 9) == 0) return 0xFFFDAB;
+    if (len == 9 && str_ncasecmp(name, "rosybrown", 9) == 0) return 0xBC8F8F;
+    if (len == 9 && str_ncasecmp(name, "royalblue", 9) == 0) return 0x4169E1;
+    if (len == 9 && str_ncasecmp(name, "slateblue", 9) == 0) return 0x6A5ACD;
+    if (len == 9 && str_ncasecmp(name, "slategray", 9) == 0) return 0x708090;
+    if (len == 9 && str_ncasecmp(name, "slategrey", 9) == 0) return 0x708090;
+    if (len == 9 && str_ncasecmp(name, "steelblue", 9) == 0) return 0x4682B4;
+    if (len == 9 && str_ncasecmp(name, "turquoise", 9) == 0) return 0x40E0D0;
+    if (len == 10 && str_ncasecmp(name, "aquamarine", 10) == 0) return 0x7FFFD4;
+    if (len == 10 && str_ncasecmp(name, "blueviolet", 10) == 0) return 0x8A2BE2;
+    if (len == 10 && str_ncasecmp(name, "chartreuse", 10) == 0) return 0x7FFF00;
+    if (len == 10 && str_ncasecmp(name, "darkorange", 10) == 0) return 0xFF8C00;
+    if (len == 10 && str_ncasecmp(name, "darkorchid", 10) == 0) return 0x9932CC;
+    if (len == 10 && str_ncasecmp(name, "darksalmon", 10) == 0) return 0xE9967A;
+    if (len == 10 && str_ncasecmp(name, "darkviolet", 10) == 0) return 0x9400D3;
+    if (len == 10 && str_ncasecmp(name, "ghostwhite", 10) == 0) return 0xF8F8FF;
+    if (len == 10 && str_ncasecmp(name, "lightcoral", 10) == 0) return 0xF08080;
+    if (len == 10 && str_ncasecmp(name, "lightgreen", 10) == 0) return 0x90EE90;
+    if (len == 10 && str_ncasecmp(name, "mediumblue", 10) == 0) return 0x0000CD;
+    if (len == 10 && str_ncasecmp(name, "papayawhip", 10) == 0) return 0xFFEFD5;
+    if (len == 10 && str_ncasecmp(name, "powderblue", 10) == 0) return 0xB0E0E6;
+    if (len == 10 && str_ncasecmp(name, "sandybrown", 10) == 0) return 0xF4A460;
+    if (len == 10 && str_ncasecmp(name, "whitesmoke", 10) == 0) return 0xF5F5F5;
+    if (len == 11 && str_ncasecmp(name, "aliceblue", 9) == 0) return 0xF0F8FF;
+    if (len == 11 && str_ncasecmp(name, "deepskyblue", 11) == 0) return 0x00BFFF;
+    if (len == 11 && str_ncasecmp(name, "floralwhite", 11) == 0) return 0xFFFAF0;
+    if (len == 11 && str_ncasecmp(name, "forestgreen", 11) == 0) return 0x228B22;
+    if (len == 11 && str_ncasecmp(name, "greenyellow", 11) == 0) return 0xADFF2F;
+    if (len == 11 && str_ncasecmp(name, "navajowhite", 11) == 0) return 0xFFDEAD;
+    if (len == 11 && str_ncasecmp(name, "yellowgreen", 11) == 0) return 0x9ACD32;
+    if (len == 12 && str_ncasecmp(name, "antiquewhite", 12) == 0) return 0xFAEBD7;
+    if (len == 12 && str_ncasecmp(name, "darkseagreen", 12) == 0) return 0x8FBC8F;
+    if (len == 12 && str_ncasecmp(name, "lemonchiffon", 12) == 0) return 0xFFFACD;
+    if (len == 12 && str_ncasecmp(name, "lightyellow", 11) == 0) return 0xFFFFE0;
+    if (len == 12 && str_ncasecmp(name, "lightsalmon", 11) == 0) return 0xFFA07A;
+    if (len == 12 && str_ncasecmp(name, "mediumorchid", 12) == 0) return 0xBA55D3;
+    if (len == 12 && str_ncasecmp(name, "mediumpurple", 12) == 0) return 0x9370DB;
+    if (len == 13 && str_ncasecmp(name, "darkgoldenrod", 13) == 0) return 0xB8860B;
+    if (len == 13 && str_ncasecmp(name, "darkslateblue", 13) == 0) return 0x483D8B;
+    if (len == 13 && str_ncasecmp(name, "darkslategray", 13) == 0) return 0x2F4F4F;
+    if (len == 13 && str_ncasecmp(name, "darkslategrey", 13) == 0) return 0x2F4F4F;
+    if (len == 13 && str_ncasecmp(name, "darkturquoise", 13) == 0) return 0x00CED1;
+    if (len == 13 && str_ncasecmp(name, "lightseagreen", 13) == 0) return 0x20B2AA;
+    if (len == 13 && str_ncasecmp(name, "palegoldenrod", 13) == 0) return 0xEEE8AA;
+    if (len == 13 && str_ncasecmp(name, "paleturquoise", 13) == 0) return 0xAFEEEE;
+    if (len == 13 && str_ncasecmp(name, "palevioletred", 13) == 0) return 0xDB7093;
+    if (len == 14 && str_ncasecmp(name, "blanchedalmond", 14) == 0) return 0xFFEBCD;
+    if (len == 14 && str_ncasecmp(name, "cornflowerblue", 14) == 0) return 0x6495ED;
+    if (len == 14 && str_ncasecmp(name, "darkolivegreen", 14) == 0) return 0x556B2F;
+    if (len == 14 && str_ncasecmp(name, "lightslategray", 14) == 0) return 0x778899;
+    if (len == 14 && str_ncasecmp(name, "lightsteelblue", 14) == 0) return 0xB0C4DE;
+    if (len == 15 && str_ncasecmp(name, "mediumseagreen", 14) == 0) return 0x3CB371;
+    if (len == 15 && str_ncasecmp(name, "mediumslateblue", 15) == 0) return 0x7B68EE;
+    if (len == 16 && str_ncasecmp(name, "mediumaquamarine", 16) == 0) return 0x66CDAA;
+    if (len == 17 && str_ncasecmp(name, "mediumspringgreen", 17) == 0) return 0x00FA9A;
+    if (len == 20 && str_ncasecmp(name, "lightgoldenrodyellow", 20) == 0) return 0xFAFAD2;
+
+    /* Catch-all: try parsing as hex without # prefix (some legacy HTML does this) */
+    if (len == 6) {
+        int is_hex = 1;
+        for (int i = 0; i < 6; i++) {
+            char c = name[i];
+            if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')))
+                { is_hex = 0; break; }
+        }
+        if (is_hex) return parse_html_color(name);
+    }
+    if (len == 3) {
+        /* 3-digit hex like "FFF" */
+        int is_hex = 1;
+        for (int i = 0; i < 3; i++) {
+            char c = name[i];
+            if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')))
+                { is_hex = 0; break; }
+        }
+        if (is_hex) {
+            /* Expand 3-digit to 6-digit */
+            char expanded[7];
+            expanded[0] = expanded[1] = name[0];
+            expanded[2] = expanded[3] = name[1];
+            expanded[4] = expanded[5] = name[2];
+            expanded[6] = 0;
+            return parse_html_color(expanded);
+        }
+    }
+
+    /* transparent → white (no transparency support) */
+    if (len == 11 && str_ncasecmp(name, "transparent", 11) == 0) return 0xFFFFFF;
+
     return 0xFFFFFF;
 }
 
-/* Flush centered line buffer: render accumulated text centered */
+/* Flush centered/right-aligned line buffer: render accumulated text with offset */
 static void flush_center_buf(void)
 {
     if (rs.center_buf_len <= 0) return;
-    int char_w = rs.center_line_bold ? 9 : 8;
-    int text_w = rs.center_buf_len * char_w;
+    /* Measure text width considering per-char bold */
+    int text_w = 0;
+    for (int i = 0; i < rs.center_buf_len; i++)
+        text_w += rs.center_line_bold ? 9 : 8;
     int avail = rs.max_x - rs.start_x;
-    int offset = (avail - text_w) / 2;
+    int offset;
+    if (rs.right_align)
+        offset = avail - text_w;
+    else
+        offset = (avail - text_w) / 2;
     if (offset < 0) offset = 0;
     int draw_x = rs.start_x + offset;
     int draw_y = rs.y - rs.scroll;
 
     if (draw_y >= -16 && draw_y < rs.ch) {
-        uint32_t fg = rs.in_link ? rs.link_color : rs.text_color;
         for (int i = 0; i < rs.center_buf_len; i++) {
+            uint32_t fg = rs.center_buf_colors[i];
+            int char_w = rs.center_line_bold ? 9 : 8;
             if (rs.center_line_bold)
                 canvas_draw_char_bold(rs.canvas, rs.cw, rs.ch,
                     draw_x + i * char_w, draw_y, rs.center_buf[i], fg);
             else
                 canvas_draw_char(rs.canvas, rs.cw, rs.ch,
                     draw_x + i * char_w, draw_y, rs.center_buf[i], fg);
-            if (rs.underline && draw_y + 15 >= 0 && draw_y + 15 < rs.ch)
+            if (rs.center_buf_underline[i] && draw_y + 15 >= 0 && draw_y + 15 < rs.ch)
                 for (int col = 0; col < char_w; col++)
                     if (draw_x + i * char_w + col >= 0 && draw_x + i * char_w + col < rs.cw)
                         rs.canvas[(draw_y + 15) * rs.cw + draw_x + i * char_w + col] = fg;
+            if (rs.center_buf_strikethrough[i]) {
+                int sy = draw_y + 7;
+                if (sy >= 0 && sy < rs.ch)
+                    for (int col = 0; col < char_w; col++)
+                        if (draw_x + i * char_w + col >= 0 && draw_x + i * char_w + col < rs.cw)
+                            rs.canvas[sy * rs.cw + draw_x + i * char_w + col] = fg;
+            }
         }
     }
     /* Update rs.x to end of centered text for link tracking */
+    int char_w = rs.center_line_bold ? 9 : 8;
     rs.x = rs.start_x + offset + rs.center_buf_len * char_w;
     rs.center_buf_len = 0;
 }
 
 static void render_newline(void)
 {
-    if (rs.centered && rs.center_buf_len > 0)
+    if ((rs.centered || rs.right_align) && rs.center_buf_len > 0)
         flush_center_buf();
     rs.x = rs.start_x;
     rs.y += rs.line_height;
     rs.center_buf_len = 0;
+    rs.last_char_space = 1; /* Suppress leading space on new line */
 }
 
 static void render_char(char c)
 {
     if (rs.in_title || rs.in_head || rs.in_style || rs.in_script) return;
+    if (rs.display_none) return;
 
-    /* Centering mode: accumulate chars in buffer */
-    if (rs.centered) {
+    /* Centering/right-align mode: accumulate chars in buffer with formatting */
+    if (rs.centered || rs.right_align) {
         int char_w = rs.bold ? 9 : 8;
         /* Check word wrap */
         int buf_w = rs.center_buf_len * char_w;
@@ -740,11 +1105,18 @@ static void render_char(char c)
             rs.y += rs.line_height;
         }
         if (rs.center_buf_len < CENTER_BUF_MAX - 1) {
-            rs.center_buf[rs.center_buf_len++] = c;
+            int idx = rs.center_buf_len;
+            rs.center_buf[idx] = c;
+            rs.center_buf_colors[idx] = rs.in_link ? rs.link_color : rs.text_color;
+            rs.center_buf_underline[idx] = rs.underline;
+            rs.center_buf_strikethrough[idx] = rs.strikethrough;
+            rs.center_buf_in_link = rs.in_link;
+            rs.center_buf_len++;
             rs.center_line_bold = rs.bold;
         }
         /* Keep rs.x updated for link region tracking */
         rs.x += char_w;
+        rs.last_char_space = (c == ' ');
         return;
     }
 
@@ -778,28 +1150,73 @@ static void render_char(char c)
         }
     }
     rs.x += rs.bold ? 9 : 8;
+    rs.last_char_space = (c == ' ');
 }
 
 static void render_text(const char *text, int len)
 {
+    if (rs.display_none) return;
     for (int i = 0; i < len; i++) {
         char c = text[i];
         if (c == '\n') {
             if (rs.preformatted) render_newline();
-            else if (i > 0 && text[i-1] != ' ') render_char(' ');
+            else {
+                /* Treat newline as space, but collapse */
+                if (!rs.last_char_space && rs.x > rs.start_x)
+                    render_char(' ');
+            }
             continue;
         }
         if (c == '\r') continue;
         if (c == '\t') {
-            for (int t = 0; t < 4; t++) render_char(' ');
+            if (rs.preformatted) {
+                for (int t = 0; t < 4; t++) render_char(' ');
+            } else {
+                if (!rs.last_char_space && rs.x > rs.start_x)
+                    render_char(' ');
+            }
             continue;
         }
         if (!rs.preformatted && c == ' ') {
-            /* Collapse whitespace */
-            if (i > 0 && text[i-1] == ' ') continue;
+            /* Collapse consecutive whitespace */
+            if (rs.last_char_space) continue;
         }
         if (c >= 32 && c <= 126)
             render_char(c);
+        else if ((uint8_t)c >= 128) {
+            /* Map common Latin-1 chars to ASCII approximations */
+            uint8_t uc = (uint8_t)c;
+            if (uc >= 0xC0 && uc <= 0xC5) render_char('A');
+            else if (uc == 0xC6) { render_char('A'); render_char('E'); }
+            else if (uc == 0xC7) render_char('C');
+            else if (uc >= 0xC8 && uc <= 0xCB) render_char('E');
+            else if (uc >= 0xCC && uc <= 0xCF) render_char('I');
+            else if (uc == 0xD0) render_char('D');
+            else if (uc == 0xD1) render_char('N');
+            else if (uc >= 0xD2 && uc <= 0xD6) render_char('O');
+            else if (uc == 0xD7) render_char('x');
+            else if (uc == 0xD8) render_char('O');
+            else if (uc >= 0xD9 && uc <= 0xDC) render_char('U');
+            else if (uc == 0xDD) render_char('Y');
+            else if (uc >= 0xE0 && uc <= 0xE5) render_char('a');
+            else if (uc == 0xE6) { render_char('a'); render_char('e'); }
+            else if (uc == 0xE7) render_char('c');
+            else if (uc >= 0xE8 && uc <= 0xEB) render_char('e');
+            else if (uc >= 0xEC && uc <= 0xEF) render_char('i');
+            else if (uc == 0xF0) render_char('d');
+            else if (uc == 0xF1) render_char('n');
+            else if (uc >= 0xF2 && uc <= 0xF6) render_char('o');
+            else if (uc == 0xF7) render_char('/');
+            else if (uc == 0xF8) render_char('o');
+            else if (uc >= 0xF9 && uc <= 0xFC) render_char('u');
+            else if (uc == 0xFD || uc == 0xFF) render_char('y');
+            else if (uc == 0xA0) render_char(' ');  /* NBSP */
+            else if (uc == 0xA9) render_char('c');  /* copyright */
+            else if (uc == 0xAE) render_char('R');  /* registered */
+            else if (uc == 0xB0) render_char('o');  /* degree */
+            else if (uc == 0xB7) render_char('*');  /* middle dot */
+            else render_char('?');
+        }
     }
 }
 
@@ -829,7 +1246,7 @@ static int get_attr(const char *tag, int tag_len, const char *attr, char *out, i
 /* Parse inline style="" attribute and apply to render state */
 static void apply_inline_style(const char *tag, int tag_len)
 {
-    char style[128];
+    char style[256];
     if (!get_attr(tag, tag_len, "style", style, sizeof(style))) return;
 
     int pos = 0;
@@ -864,22 +1281,127 @@ static void apply_inline_style(const char *tag, int tag_len)
 
         /* Apply */
         if (str_cmp(prop, "color") == 0) {
-            rs.text_color = named_color(val);
+            uint32_t c = named_color(val);
+            if (c != 0xFFFFFF || str_ncasecmp(val, "white", 5) == 0 || val[0] == '#' ||
+                str_ncasecmp(val, "rgb", 3) == 0)
+                rs.text_color = c;
         } else if (str_cmp(prop, "background-color") == 0 || str_cmp(prop, "background") == 0) {
-            /* For block elements, could fill area */
+            if (str_ncasecmp(val, "url", 3) != 0) {
+                uint32_t c = named_color(val);
+                if (c != 0xFFFFFF || str_ncasecmp(val, "white", 5) == 0 ||
+                    val[0] == '#' || str_ncasecmp(val, "rgb", 3) == 0) {
+                    /* For block-level inline: fill background of current line area */
+                    int draw_y = rs.y - rs.scroll;
+                    if (draw_y >= -rs.line_height && draw_y < rs.ch)
+                        fill_rect(rs.canvas, rs.cw, rs.ch, rs.start_x, draw_y,
+                                  rs.max_x - rs.start_x, rs.line_height, c);
+                }
+            }
         } else if (str_cmp(prop, "font-weight") == 0) {
             if (str_ncasecmp(val, "bold", 4) == 0) rs.bold = 1;
             else if (str_ncasecmp(val, "normal", 6) == 0) rs.bold = 0;
+            else {
+                int w = 0;
+                for (int j = 0; val[j] >= '0' && val[j] <= '9'; j++)
+                    w = w * 10 + (val[j] - '0');
+                if (w >= 700) rs.bold = 1;
+                else if (w > 0) rs.bold = 0;
+            }
         } else if (str_cmp(prop, "font-style") == 0) {
-            if (str_ncasecmp(val, "italic", 6) == 0) rs.italic = 1;
+            if (str_ncasecmp(val, "italic", 6) == 0 || str_ncasecmp(val, "oblique", 7) == 0)
+                rs.italic = 1;
             else if (str_ncasecmp(val, "normal", 6) == 0) rs.italic = 0;
         } else if (str_cmp(prop, "text-decoration") == 0) {
             if (str_ncasecmp(val, "underline", 9) == 0) rs.underline = 1;
             else if (str_ncasecmp(val, "line-through", 12) == 0) rs.strikethrough = 1;
             else if (str_ncasecmp(val, "none", 4) == 0) { rs.underline = 0; rs.strikethrough = 0; }
         } else if (str_cmp(prop, "text-align") == 0) {
-            if (str_ncasecmp(val, "center", 6) == 0) rs.centered = 1;
+            if (rs.centered && rs.center_buf_len > 0) flush_center_buf();
+            if (str_ncasecmp(val, "center", 6) == 0) { rs.centered = 1; rs.right_align = 0; }
+            else if (str_ncasecmp(val, "right", 5) == 0) { rs.right_align = 1; rs.centered = 0; }
+            else { rs.centered = 0; rs.right_align = 0; }
+        } else if (str_cmp(prop, "display") == 0) {
+            if (str_ncasecmp(val, "none", 4) == 0) rs.display_none++;
+        } else if (str_cmp(prop, "font-size") == 0) {
+            if (str_ncasecmp(val, "large", 5) == 0 || str_ncasecmp(val, "x-large", 7) == 0 ||
+                str_ncasecmp(val, "xx-large", 8) == 0) rs.bold = 1;
+            else if (str_ncasecmp(val, "small", 5) == 0 || str_ncasecmp(val, "x-small", 7) == 0)
+                rs.bold = 0;
+            else {
+                int px = 0;
+                for (int j = 0; val[j] >= '0' && val[j] <= '9'; j++)
+                    px = px * 10 + (val[j] - '0');
+                if (px > 20) rs.bold = 1;
+            }
+        } else if (str_cmp(prop, "margin-left") == 0 || str_cmp(prop, "padding-left") == 0) {
+            int px = 0;
+            for (int j = 0; val[j] >= '0' && val[j] <= '9'; j++)
+                px = px * 10 + (val[j] - '0');
+            if (px > 0 && px < 200) { rs.start_x += px; rs.x = rs.start_x; }
+        } else if (str_cmp(prop, "margin-right") == 0 || str_cmp(prop, "padding-right") == 0) {
+            int px = 0;
+            for (int j = 0; val[j] >= '0' && val[j] <= '9'; j++)
+                px = px * 10 + (val[j] - '0');
+            if (px > 0 && px < 200) rs.max_x -= px;
         }
+    }
+}
+
+/* Apply CSS rule properties to render state */
+static void apply_css_rule(css_rule_t *css)
+{
+    if (!css) return;
+    if (css->has_color) rs.text_color = css->color;
+    if (css->bold == 1) rs.bold = 1;
+    else if (css->bold == 0) rs.bold = 0;
+    if (css->italic == 1) rs.italic = 1;
+    else if (css->italic == 0) rs.italic = 0;
+    if (css->underline == 1) rs.underline = 1;
+    else if (css->underline == 0) rs.underline = 0;
+    if (css->text_align == 2) { rs.centered = 1; rs.right_align = 0; }
+    else if (css->text_align == 3) { rs.right_align = 1; rs.centered = 0; }
+    else if (css->text_align == 1) { rs.centered = 0; rs.right_align = 0; }
+    if (css->display_none) rs.display_none++;
+    if (css->font_size >= 5) rs.bold = 1;
+    if (css->margin_left >= 0) { rs.start_x += css->margin_left; rs.x = rs.start_x; }
+    if (css->margin_right >= 0) rs.max_x -= css->margin_right;
+    if (css->padding_left > 0) { rs.start_x += css->padding_left; rs.x = rs.start_x; }
+    if (css->padding_right > 0) rs.max_x -= css->padding_right;
+}
+
+/* Apply CSS rules by tag name, class, and id for a given tag */
+static void apply_css_for_tag(const char *name, const char *tag, int tag_len)
+{
+    /* Apply element-level CSS */
+    css_rule_t *css = css_lookup(name);
+    if (css) apply_css_rule(css);
+    /* Apply class-level CSS */
+    char cls[CSS_SELECTOR_MAX];
+    if (get_attr(tag, tag_len, "class", cls, sizeof(cls))) {
+        /* Handle space-separated class list */
+        char single[CSS_SELECTOR_MAX];
+        int si = 0, ci = 0;
+        while (1) {
+            if (cls[ci] == ' ' || cls[ci] == 0) {
+                if (si > 0) {
+                    single[si] = 0;
+                    css_rule_t *cc = css_lookup_class(single);
+                    if (cc) apply_css_rule(cc);
+                    si = 0;
+                }
+                if (!cls[ci]) break;
+                ci++;
+                continue;
+            }
+            if (si < CSS_SELECTOR_MAX - 1) single[si++] = cls[ci];
+            ci++;
+        }
+    }
+    /* Apply ID-level CSS */
+    char id[CSS_SELECTOR_MAX];
+    if (get_attr(tag, tag_len, "id", id, sizeof(id))) {
+        css_rule_t *ci = css_lookup_id(id);
+        if (ci) apply_css_rule(ci);
     }
 }
 
@@ -904,7 +1426,7 @@ static void handle_tag(const char *tag, int tag_len)
     name[ni] = 0;
 
     /* Flush centered text buffer before tags that draw inline content */
-    if (rs.centered && rs.center_buf_len > 0 &&
+    if ((rs.centered || rs.right_align) && rs.center_buf_len > 0 &&
         (str_cmp(name, "input") == 0 || str_cmp(name, "img") == 0 ||
          str_cmp(name, "button") == 0 || str_cmp(name, "textarea") == 0 ||
          str_cmp(name, "select") == 0)) {
@@ -1067,15 +1589,16 @@ static void handle_tag(const char *tag, int tag_len)
                     /* Display value or placeholder */
                     const char *txt;
                     uint32_t txt_color;
-                    if (is_focused && form_inputs[fi_idx].value[0]) {
+                    /* Always show the current stored value (which includes user-typed text) */
+                    if (fi_idx >= 0 && form_inputs[fi_idx].value[0]) {
                         txt = form_inputs[fi_idx].value;
                         txt_color = 0x1A1A1A;
-                    } else if (value[0]) {
-                        txt = value;
-                        txt_color = 0x1A1A1A;
-                    } else {
+                    } else if (placeholder[0]) {
                         txt = placeholder;
                         txt_color = 0xA0A0A0;
+                    } else {
+                        txt = "";
+                        txt_color = 0x1A1A1A;
                     }
                     if (txt[0]) {
                         int max_txt = (fw - 8) / 8;
@@ -1125,30 +1648,73 @@ static void handle_tag(const char *tag, int tag_len)
         if (is_close) {
             if (rs.color_stack_depth > 0)
                 rs.text_color = rs.color_stack[--rs.color_stack_depth];
+            if (rs.style_stack_depth > 0) {
+                rs.style_stack_depth--;
+                rs.centered = rs.style_stack[rs.style_stack_depth].centered;
+                rs.right_align = rs.style_stack[rs.style_stack_depth].right_align;
+            }
+            if (rs.centered && rs.center_buf_len > 0) flush_center_buf();
             rs.y += 8; rs.x = rs.start_x;
         } else {
             if (rs.color_stack_depth < COLOR_STACK_MAX)
                 rs.color_stack[rs.color_stack_depth++] = rs.text_color;
+            if (rs.style_stack_depth < STYLE_STACK_MAX) {
+                rs.style_stack[rs.style_stack_depth].centered = rs.centered;
+                rs.style_stack[rs.style_stack_depth].right_align = rs.right_align;
+                rs.style_stack_depth++;
+            }
+            if (rs.centered && rs.center_buf_len > 0) flush_center_buf();
             render_newline(); rs.y += 4;
+            /* Check align attribute */
+            char align_val[16];
+            if (get_attr(tag, tag_len, "align", align_val, sizeof(align_val))) {
+                if (str_ncasecmp(align_val, "center", 6) == 0) { rs.centered = 1; rs.right_align = 0; }
+                else if (str_ncasecmp(align_val, "right", 5) == 0) { rs.right_align = 1; rs.centered = 0; }
+                else { rs.centered = 0; rs.right_align = 0; }
+            }
+            apply_css_for_tag("p", tag, tag_len);
             apply_inline_style(tag, tag_len);
         }
     } else if (str_cmp(name, "div") == 0) {
         if (!is_close) {
             if (rs.color_stack_depth < COLOR_STACK_MAX)
                 rs.color_stack[rs.color_stack_depth++] = rs.text_color;
+            if (rs.style_stack_depth < STYLE_STACK_MAX) {
+                rs.style_stack[rs.style_stack_depth].centered = rs.centered;
+                rs.style_stack[rs.style_stack_depth].right_align = rs.right_align;
+                rs.style_stack[rs.style_stack_depth].bold = rs.bold;
+                rs.style_stack_depth++;
+            }
+            if (rs.centered && rs.center_buf_len > 0) flush_center_buf();
             render_newline();
+            /* Check align attribute */
+            char align_val[16];
+            if (get_attr(tag, tag_len, "align", align_val, sizeof(align_val))) {
+                if (str_ncasecmp(align_val, "center", 6) == 0) { rs.centered = 1; rs.right_align = 0; }
+                else if (str_ncasecmp(align_val, "right", 5) == 0) { rs.right_align = 1; rs.centered = 0; }
+                else { rs.centered = 0; rs.right_align = 0; }
+            }
+            apply_css_for_tag("div", tag, tag_len);
             apply_inline_style(tag, tag_len);
         } else {
+            if (rs.centered && rs.center_buf_len > 0) flush_center_buf();
             if (rs.color_stack_depth > 0)
                 rs.text_color = rs.color_stack[--rs.color_stack_depth];
+            if (rs.style_stack_depth > 0) {
+                rs.style_stack_depth--;
+                rs.centered = rs.style_stack[rs.style_stack_depth].centered;
+                rs.right_align = rs.style_stack[rs.style_stack_depth].right_align;
+                rs.bold = rs.style_stack[rs.style_stack_depth].bold;
+            }
             render_newline();
         }
     } else if (str_cmp(name, "span") == 0) {
-        /* Inline element - check for style color */
+        /* Inline element - check for style color, class, id */
         if (!is_close) {
             /* Push current color */
             if (rs.color_stack_depth < COLOR_STACK_MAX)
                 rs.color_stack[rs.color_stack_depth++] = rs.text_color;
+            apply_css_for_tag("span", tag, tag_len);
             apply_inline_style(tag, tag_len);
         } else {
             if (rs.color_stack_depth > 0)
@@ -1161,10 +1727,13 @@ static void handle_tag(const char *tag, int tag_len)
         if (is_close) {
             if (rs.center_buf_len > 0) flush_center_buf();
             rs.centered = 0;
+            rs.right_align = 0;
             render_newline();
         } else {
+            if (rs.centered && rs.center_buf_len > 0) flush_center_buf();
             render_newline();
             rs.centered = 1;
+            rs.right_align = 0;
             rs.center_buf_len = 0;
         }
     /* Inline formatting tags */
@@ -1243,7 +1812,13 @@ static void handle_tag(const char *tag, int tag_len)
             rs.in_link = 0;
             rs.underline = 0;
             rs.link_href[0] = 0;
+            /* Restore color from stack */
+            if (rs.color_stack_depth > 0)
+                rs.text_color = rs.color_stack[--rs.color_stack_depth];
         } else {
+            /* Save current color before link */
+            if (rs.color_stack_depth < COLOR_STACK_MAX)
+                rs.color_stack[rs.color_stack_depth++] = rs.text_color;
             rs.in_link = 1;
             rs.underline = 1;
             rs.link_start_x = rs.x;
@@ -1251,38 +1826,76 @@ static void handle_tag(const char *tag, int tag_len)
             /* Extract href attribute */
             char href_val[URL_MAX];
             if (get_attr(tag, tag_len, "href", href_val, sizeof(href_val))) {
-                resolve_url(href_val, url_bar, rs.link_href, URL_MAX);
+                /* Skip javascript: and # links */
+                if (str_ncasecmp(href_val, "javascript:", 11) != 0)
+                    resolve_url(href_val, url_bar, rs.link_href, URL_MAX);
+                else
+                    rs.link_href[0] = 0;
             } else {
                 rs.link_href[0] = 0;
             }
+            /* Apply CSS for links */
+            css_rule_t *a_css = css_lookup("a");
+            if (a_css) {
+                if (a_css->has_color) rs.link_color = a_css->color;
+                if (a_css->underline == 0) rs.underline = 0;
+            }
+            apply_inline_style(tag, tag_len);
         }
     } else if (str_cmp(name, "font") == 0) {
         if (is_close) {
             if (rs.color_stack_depth > 0)
                 rs.text_color = rs.color_stack[--rs.color_stack_depth];
+            if (rs.style_stack_depth > 0) {
+                rs.style_stack_depth--;
+                rs.bold = rs.style_stack[rs.style_stack_depth].bold;
+                rs.line_height = rs.style_stack[rs.style_stack_depth].line_height;
+            }
         } else {
-            /* Push current color */
+            /* Push current color and bold state */
             if (rs.color_stack_depth < COLOR_STACK_MAX)
                 rs.color_stack[rs.color_stack_depth++] = rs.text_color;
+            if (rs.style_stack_depth < STYLE_STACK_MAX) {
+                rs.style_stack[rs.style_stack_depth].bold = rs.bold;
+                rs.style_stack[rs.style_stack_depth].line_height = rs.line_height;
+                rs.style_stack_depth++;
+            }
             char color_val[32];
             if (get_attr(tag, tag_len, "color", color_val, sizeof(color_val))) {
                 rs.text_color = named_color(color_val);
             }
-            /* Font size: sizes 5-7 render as bold */
+            /* Font size: sizes map to visual sizing */
             char size_val[8];
             if (get_attr(tag, tag_len, "size", size_val, sizeof(size_val))) {
                 int sz = 0;
-                int si = 0;
-                if (size_val[0] == '+' || size_val[0] == '-') si = 1;
-                while (size_val[si] >= '0' && size_val[si] <= '9')
-                    sz = sz * 10 + (size_val[si++] - '0');
-                if (size_val[0] == '+') sz += 3;
-                if (sz >= 5) rs.bold = 1;
+                int si2 = 0;
+                int relative = 0;
+                if (size_val[0] == '+') { relative = 1; si2 = 1; }
+                else if (size_val[0] == '-') { relative = -1; si2 = 1; }
+                while (size_val[si2] >= '0' && size_val[si2] <= '9')
+                    sz = sz * 10 + (size_val[si2++] - '0');
+                if (relative == 1) sz += 3;
+                else if (relative == -1) sz = 3 - sz;
+                /* Map font size to visual effects */
+                if (sz >= 6) { rs.bold = 1; rs.line_height = 28; }
+                else if (sz >= 5) { rs.bold = 1; rs.line_height = 24; }
+                else if (sz >= 4) { rs.bold = 1; rs.line_height = 20; }
+                else if (sz == 3) { /* normal - keep current */ }
+                else if (sz == 2) { /* small - keep current */ }
+                else if (sz <= 1) { /* very small - keep current */ }
             }
+            /* Apply CSS and inline style */
+            apply_css_for_tag("font", tag, tag_len);
+            apply_inline_style(tag, tag_len);
         }
     } else if (str_cmp(name, "pre") == 0 || str_cmp(name, "code") == 0) {
         rs.preformatted = !is_close;
-        if (!is_close) { render_newline(); }
+        if (!is_close) {
+            render_newline();
+            /* Draw subtle background for pre/code blocks */
+            apply_css_for_tag(name, tag, tag_len);
+            apply_inline_style(tag, tag_len);
+        }
     } else if (str_cmp(name, "title") == 0) {
         rs.in_title = !is_close;
     } else if (str_cmp(name, "head") == 0) {
@@ -1312,15 +1925,10 @@ static void handle_tag(const char *tag, int tag_len)
             if (get_attr(tag, tag_len, "link", link_val, sizeof(link_val))) {
                 rs.link_color = named_color(link_val);
             }
-            /* Apply CSS for body and inline style */
-            css_rule_t *css = css_lookup("body");
-            if (css) {
-                if (css->has_color) rs.text_color = css->color;
-                if (css->has_bg_color) {
-                    rs.bg_color = css->bg_color;
-                    fill_rect(rs.canvas, rs.cw, rs.ch, 0, 0, rs.cw, rs.ch, rs.bg_color);
-                }
-            }
+            /* Apply CSS for body, class, id, and inline style */
+            apply_css_for_tag("body", tag, tag_len);
+            if (rs.bg_color != 0xFFFFFF)
+                fill_rect(rs.canvas, rs.cw, rs.ch, 0, 0, rs.cw, rs.ch, rs.bg_color);
             apply_inline_style(tag, tag_len);
         }
     /* Heading tags */
@@ -1330,9 +1938,20 @@ static void handle_tag(const char *tag, int tag_len)
             rs.bold = 0;
             rs.heading_level = 0;
             rs.line_height = 18;
+            if (rs.centered && rs.center_buf_len > 0) flush_center_buf();
+            if (rs.style_stack_depth > 0) {
+                rs.style_stack_depth--;
+                rs.centered = rs.style_stack[rs.style_stack_depth].centered;
+                rs.right_align = rs.style_stack[rs.style_stack_depth].right_align;
+            }
             render_newline();
             rs.y += 4;
         } else {
+            if (rs.style_stack_depth < STYLE_STACK_MAX) {
+                rs.style_stack[rs.style_stack_depth].centered = rs.centered;
+                rs.style_stack[rs.style_stack_depth].right_align = rs.right_align;
+                rs.style_stack_depth++;
+            }
             rs.heading_level = level;
             rs.bold = 1;
             render_newline();
@@ -1340,29 +1959,63 @@ static void handle_tag(const char *tag, int tag_len)
             /* Larger line height for headings */
             int sizes[] = {0, 32, 28, 24, 20, 18, 18};
             rs.line_height = sizes[level];
+            /* Check align attribute */
+            char align_val[16];
+            if (get_attr(tag, tag_len, "align", align_val, sizeof(align_val))) {
+                if (str_ncasecmp(align_val, "center", 6) == 0) { rs.centered = 1; rs.right_align = 0; rs.center_buf_len = 0; }
+                else if (str_ncasecmp(align_val, "right", 5) == 0) { rs.right_align = 1; rs.centered = 0; }
+            }
+            /* Apply CSS */
+            char tag_name_str[4];
+            tag_name_str[0] = 'h';
+            tag_name_str[1] = name[1];
+            tag_name_str[2] = 0;
+            apply_css_for_tag(tag_name_str, tag, tag_len);
+            apply_inline_style(tag, tag_len);
         }
     /* List tags */
     } else if (str_cmp(name, "ul") == 0) {
-        if (is_close) { rs.in_list = 0; rs.start_x -= 20; render_newline(); }
-        else { rs.in_list = 1; rs.list_ordered = 0; rs.list_item = 0; rs.start_x += 20; render_newline(); }
-    } else if (str_cmp(name, "ol") == 0) {
-        if (is_close) { rs.in_list = 0; rs.start_x -= 20; render_newline(); }
-        else { rs.in_list = 1; rs.list_ordered = 1; rs.list_item = 0; rs.start_x += 20; render_newline(); }
-    } else if (str_cmp(name, "li") == 0 && !is_close) {
-        render_newline();
-        rs.list_item++;
-        if (rs.list_ordered) {
-            char num[8];
-            int n = rs.list_item;
-            int ni2 = 0;
-            if (n >= 10) num[ni2++] = '0' + (n / 10);
-            num[ni2++] = '0' + (n % 10);
-            num[ni2++] = '.';
-            num[ni2++] = ' ';
-            num[ni2] = 0;
-            render_text(num, ni2);
+        if (is_close) {
+            if (rs.list_depth > 0) rs.list_depth--;
+            if (rs.list_depth == 0) rs.in_list = 0;
+            rs.start_x -= 20; render_newline();
         } else {
-            render_text("* ", 2);
+            rs.in_list = 1; rs.list_ordered = 0; rs.list_item = 0;
+            rs.list_depth++; rs.start_x += 20; render_newline();
+        }
+    } else if (str_cmp(name, "ol") == 0) {
+        if (is_close) {
+            if (rs.list_depth > 0) rs.list_depth--;
+            if (rs.list_depth == 0) rs.in_list = 0;
+            rs.start_x -= 20; render_newline();
+        } else {
+            rs.in_list = 1; rs.list_ordered = 1; rs.list_item = 0;
+            rs.list_depth++; rs.start_x += 20; render_newline();
+        }
+    } else if (str_cmp(name, "li") == 0) {
+        if (!is_close) {
+            render_newline();
+            rs.list_item++;
+            if (rs.list_ordered) {
+                char num[8];
+                int n = rs.list_item;
+                int ni2 = 0;
+                if (n >= 100) num[ni2++] = '0' + (n / 100);
+                if (n >= 10) num[ni2++] = '0' + ((n / 10) % 10);
+                num[ni2++] = '0' + (n % 10);
+                num[ni2++] = '.';
+                num[ni2++] = ' ';
+                num[ni2] = 0;
+                render_text(num, ni2);
+            } else {
+                /* Use different bullets for different nesting levels */
+                if (rs.list_depth <= 1)
+                    render_text("* ", 2);
+                else if (rs.list_depth == 2)
+                    render_text("- ", 2);
+                else
+                    render_text(". ", 2);
+            }
         }
     /* Definition list */
     } else if (str_cmp(name, "dl") == 0) {
@@ -1380,8 +2033,30 @@ static void handle_tag(const char *tag, int tag_len)
             rs.in_table = 1;
             render_newline();
             rs.y += 4;
+            /* Check for bgcolor */
+            char bg_val[32];
+            if (get_attr(tag, tag_len, "bgcolor", bg_val, sizeof(bg_val))) {
+                /* Fill a background region for the table */
+                int draw_y = rs.y - rs.scroll;
+                if (draw_y >= 0 && draw_y < rs.ch)
+                    fill_rect(rs.canvas, rs.cw, rs.ch, rs.start_x, draw_y,
+                              rs.max_x - rs.start_x, 2, named_color(bg_val));
+            }
+            /* Check for width */
+            char width_val[16];
+            if (get_attr(tag, tag_len, "width", width_val, sizeof(width_val))) {
+                int w = 0;
+                for (int wi = 0; width_val[wi] >= '0' && width_val[wi] <= '9'; wi++)
+                    w = w * 10 + (width_val[wi] - '0');
+                if (w > 0 && w < rs.max_x - rs.start_x) rs.table_width = w;
+                else rs.table_width = 0;
+            } else {
+                rs.table_width = 0;
+            }
+            apply_css_for_tag("table", tag, tag_len);
         } else {
             rs.in_table = 0;
+            rs.table_width = 0;
             render_newline();
             rs.y += 4;
         }
@@ -1397,11 +2072,25 @@ static void handle_tag(const char *tag, int tag_len)
     } else if (str_cmp(name, "td") == 0 || str_cmp(name, "th") == 0) {
         if (!is_close) {
             /* Move to next column position */
-            int col_w = (rs.max_x - rs.start_x) / 4;  /* Simple: 4 equal columns */
+            int avail = rs.table_width > 0 ? rs.table_width : (rs.max_x - rs.start_x);
+            int col_w = avail / 4;  /* Default: 4 equal columns */
             if (col_w < 60) col_w = 60;
             rs.x = rs.table_col_x;
             if (name[1] == 'h') rs.bold = 1;  /* <th> = bold */
             rs.table_col++;
+            /* Cell background */
+            char bg_val[32];
+            if (get_attr(tag, tag_len, "bgcolor", bg_val, sizeof(bg_val))) {
+                int draw_y = rs.y - rs.scroll;
+                if (draw_y >= 0 && draw_y < rs.ch)
+                    fill_rect(rs.canvas, rs.cw, rs.ch, rs.x, draw_y, col_w, rs.line_height, named_color(bg_val));
+            }
+            /* Cell alignment */
+            char align_val[16];
+            if (get_attr(tag, tag_len, "align", align_val, sizeof(align_val))) {
+                if (str_ncasecmp(align_val, "center", 6) == 0) rs.centered = 1;
+                else if (str_ncasecmp(align_val, "right", 5) == 0) rs.right_align = 1;
+            }
             /* Draw a subtle cell border */
             int draw_y = rs.y - rs.scroll;
             if (draw_y >= 0 && draw_y < rs.ch)
@@ -1409,7 +2098,9 @@ static void handle_tag(const char *tag, int tag_len)
                            col_w, 0xD0D0D0);
         } else {
             if (name[1] == 'h') rs.bold = 0;
-            int col_w = (rs.max_x - rs.start_x) / 4;
+            rs.centered = 0; rs.right_align = 0;
+            int avail = rs.table_width > 0 ? rs.table_width : (rs.max_x - rs.start_x);
+            int col_w = avail / 4;
             if (col_w < 60) col_w = 60;
             rs.table_col_x += col_w;
         }
@@ -1433,6 +2124,8 @@ static void handle_tag(const char *tag, int tag_len)
                 str_cpy(form_action, url_bar);
             if (!get_attr(tag, tag_len, "method", form_method, sizeof(form_method)))
                 str_cpy(form_method, "get");
+            apply_css_for_tag("form", tag, tag_len);
+            apply_inline_style(tag, tag_len);
         }
     } else if (str_cmp(name, "fieldset") == 0) {
         if (!is_close) { render_newline(); rs.start_x += 10; rs.x = rs.start_x; }
@@ -1482,7 +2175,13 @@ static void handle_tag(const char *tag, int tag_len)
                str_cmp(name, "aside") == 0 || str_cmp(name, "details") == 0 ||
                str_cmp(name, "summary") == 0 || str_cmp(name, "figure") == 0 ||
                str_cmp(name, "figcaption") == 0) {
-        render_newline();
+        if (!is_close) {
+            render_newline();
+            apply_css_for_tag(name, tag, tag_len);
+            apply_inline_style(tag, tag_len);
+        } else {
+            render_newline();
+        }
     /* Tags to skip content for */
     } else if (str_cmp(name, "iframe") == 0 || str_cmp(name, "object") == 0 ||
                str_cmp(name, "embed") == 0 || str_cmp(name, "applet") == 0 ||
@@ -1498,8 +2197,17 @@ static void handle_tag(const char *tag, int tag_len)
             rs.x += 150;
         }
     /* Map, area ignored */
-    } else if (str_cmp(name, "map") == 0 || str_cmp(name, "area") == 0) {
+    } else if (str_cmp(name, "map") == 0 || str_cmp(name, "area") == 0 ||
+               str_cmp(name, "param") == 0 || str_cmp(name, "source") == 0) {
         (void)is_close;
+    /* Marquee: render as static text (content flows through) */
+    } else if (str_cmp(name, "marquee") == 0) {
+        /* Just render content normally - no scrolling effect */
+        (void)is_close;
+    /* Unknown tags with style/class/id: still apply CSS */
+    } else if (!is_close) {
+        apply_css_for_tag(name, tag, tag_len);
+        apply_inline_style(tag, tag_len);
     }
     /* Set last_was_block for known block-level tags to suppress whitespace */
     if (str_cmp(name, "br") == 0 || str_cmp(name, "hr") == 0 ||
@@ -1558,6 +2266,80 @@ static char decode_entity(const char *s, int *advance)
     if (str_ncasecmp(s, "&frac34;", 8) == 0) { *advance = 8; return '/'; }
     if (str_ncasecmp(s, "&para;", 6) == 0) { *advance = 6; return 'P'; }
     if (str_ncasecmp(s, "&sect;", 6) == 0) { *advance = 6; return 'S'; }
+    if (str_ncasecmp(s, "&shy;", 5) == 0) { *advance = 5; return '-'; }
+    if (str_ncasecmp(s, "&ensp;", 6) == 0) { *advance = 6; return ' '; }
+    if (str_ncasecmp(s, "&emsp;", 6) == 0) { *advance = 6; return ' '; }
+    if (str_ncasecmp(s, "&thinsp;", 8) == 0) { *advance = 8; return ' '; }
+    if (str_ncasecmp(s, "&zwnj;", 6) == 0) { *advance = 6; return 0; }
+    if (str_ncasecmp(s, "&zwj;", 5) == 0) { *advance = 5; return 0; }
+    if (str_ncasecmp(s, "&lrm;", 5) == 0) { *advance = 5; return 0; }
+    if (str_ncasecmp(s, "&rlm;", 5) == 0) { *advance = 5; return 0; }
+    if (str_ncasecmp(s, "&uarr;", 6) == 0) { *advance = 6; return '^'; }
+    if (str_ncasecmp(s, "&darr;", 6) == 0) { *advance = 6; return 'v'; }
+    if (str_ncasecmp(s, "&harr;", 6) == 0) { *advance = 6; return '-'; }
+    if (str_ncasecmp(s, "&crarr;", 7) == 0) { *advance = 7; return '<'; }
+    if (str_ncasecmp(s, "&hearts;", 8) == 0) { *advance = 8; return '<'; }
+    if (str_ncasecmp(s, "&diams;", 7) == 0) { *advance = 7; return '*'; }
+    if (str_ncasecmp(s, "&clubs;", 7) == 0) { *advance = 7; return '*'; }
+    if (str_ncasecmp(s, "&spades;", 8) == 0) { *advance = 8; return '*'; }
+    if (str_ncasecmp(s, "&check;", 7) == 0) { *advance = 7; return 'v'; }
+    if (str_ncasecmp(s, "&cross;", 7) == 0) { *advance = 7; return 'x'; }
+    if (str_ncasecmp(s, "&star;", 6) == 0) { *advance = 6; return '*'; }
+    if (str_ncasecmp(s, "&radic;", 7) == 0) { *advance = 7; return 'v'; }
+    if (str_ncasecmp(s, "&infin;", 7) == 0) { *advance = 7; return '8'; }
+    if (str_ncasecmp(s, "&asymp;", 7) == 0) { *advance = 7; return '~'; }
+    if (str_ncasecmp(s, "&ne;", 4) == 0) { *advance = 4; return '!'; }
+    if (str_ncasecmp(s, "&le;", 4) == 0) { *advance = 4; return '<'; }
+    if (str_ncasecmp(s, "&ge;", 4) == 0) { *advance = 4; return '>'; }
+    if (str_ncasecmp(s, "&prime;", 7) == 0) { *advance = 7; return '\''; }
+    if (str_ncasecmp(s, "&Prime;", 7) == 0) { *advance = 7; return '"'; }
+    if (str_ncasecmp(s, "&permil;", 8) == 0) { *advance = 8; return '%'; }
+    if (str_ncasecmp(s, "&micro;", 7) == 0) { *advance = 7; return 'u'; }
+    if (str_ncasecmp(s, "&macr;", 6) == 0) { *advance = 6; return '-'; }
+    if (str_ncasecmp(s, "&acute;", 7) == 0) { *advance = 7; return '\''; }
+    if (str_ncasecmp(s, "&cedil;", 7) == 0) { *advance = 7; return ','; }
+    if (str_ncasecmp(s, "&ordf;", 6) == 0) { *advance = 6; return 'a'; }
+    if (str_ncasecmp(s, "&ordm;", 6) == 0) { *advance = 6; return 'o'; }
+    if (str_ncasecmp(s, "&not;", 5) == 0) { *advance = 5; return '!'; }
+    if (str_ncasecmp(s, "&plusmn;", 8) == 0) { *advance = 8; return '+'; }
+    if (str_ncasecmp(s, "&sup1;", 6) == 0) { *advance = 6; return '1'; }
+    if (str_ncasecmp(s, "&sup2;", 6) == 0) { *advance = 6; return '2'; }
+    if (str_ncasecmp(s, "&sup3;", 6) == 0) { *advance = 6; return '3'; }
+    if (str_ncasecmp(s, "&curren;", 8) == 0) { *advance = 8; return '$'; }
+    if (str_ncasecmp(s, "&brvbar;", 8) == 0) { *advance = 8; return '|'; }
+    /* Accented letters */
+    if (str_ncasecmp(s, "&aacute;", 8) == 0) { *advance = 8; return 'a'; }
+    if (str_ncasecmp(s, "&agrave;", 8) == 0) { *advance = 8; return 'a'; }
+    if (str_ncasecmp(s, "&acirc;", 7) == 0) { *advance = 7; return 'a'; }
+    if (str_ncasecmp(s, "&atilde;", 8) == 0) { *advance = 8; return 'a'; }
+    if (str_ncasecmp(s, "&auml;", 6) == 0) { *advance = 6; return 'a'; }
+    if (str_ncasecmp(s, "&aring;", 7) == 0) { *advance = 7; return 'a'; }
+    if (str_ncasecmp(s, "&aelig;", 7) == 0) { *advance = 7; return 'a'; }
+    if (str_ncasecmp(s, "&ccedil;", 8) == 0) { *advance = 8; return 'c'; }
+    if (str_ncasecmp(s, "&eacute;", 8) == 0) { *advance = 8; return 'e'; }
+    if (str_ncasecmp(s, "&egrave;", 8) == 0) { *advance = 8; return 'e'; }
+    if (str_ncasecmp(s, "&ecirc;", 7) == 0) { *advance = 7; return 'e'; }
+    if (str_ncasecmp(s, "&euml;", 6) == 0) { *advance = 6; return 'e'; }
+    if (str_ncasecmp(s, "&iacute;", 8) == 0) { *advance = 8; return 'i'; }
+    if (str_ncasecmp(s, "&igrave;", 8) == 0) { *advance = 8; return 'i'; }
+    if (str_ncasecmp(s, "&icirc;", 7) == 0) { *advance = 7; return 'i'; }
+    if (str_ncasecmp(s, "&iuml;", 6) == 0) { *advance = 6; return 'i'; }
+    if (str_ncasecmp(s, "&ntilde;", 8) == 0) { *advance = 8; return 'n'; }
+    if (str_ncasecmp(s, "&oacute;", 8) == 0) { *advance = 8; return 'o'; }
+    if (str_ncasecmp(s, "&ograve;", 8) == 0) { *advance = 8; return 'o'; }
+    if (str_ncasecmp(s, "&ocirc;", 7) == 0) { *advance = 7; return 'o'; }
+    if (str_ncasecmp(s, "&otilde;", 8) == 0) { *advance = 8; return 'o'; }
+    if (str_ncasecmp(s, "&ouml;", 6) == 0) { *advance = 6; return 'o'; }
+    if (str_ncasecmp(s, "&oslash;", 8) == 0) { *advance = 8; return 'o'; }
+    if (str_ncasecmp(s, "&uacute;", 8) == 0) { *advance = 8; return 'u'; }
+    if (str_ncasecmp(s, "&ugrave;", 8) == 0) { *advance = 8; return 'u'; }
+    if (str_ncasecmp(s, "&ucirc;", 7) == 0) { *advance = 7; return 'u'; }
+    if (str_ncasecmp(s, "&uuml;", 6) == 0) { *advance = 6; return 'u'; }
+    if (str_ncasecmp(s, "&yacute;", 8) == 0) { *advance = 8; return 'y'; }
+    if (str_ncasecmp(s, "&yuml;", 6) == 0) { *advance = 6; return 'y'; }
+    if (str_ncasecmp(s, "&szlig;", 7) == 0) { *advance = 7; return 's'; }
+    if (str_ncasecmp(s, "&eth;", 5) == 0) { *advance = 5; return 'd'; }
+    if (str_ncasecmp(s, "&thorn;", 7) == 0) { *advance = 7; return 'p'; }
 
     /* Numeric character references: &#NNN; or &#xHH; */
     if (s[1] == '#') {
@@ -1586,12 +2368,72 @@ static char decode_entity(const char *s, int *advance)
         if (val == 160) return ' ';  /* non-breaking space */
         if (val == 169) return 'c';  /* copyright */
         if (val == 174) return 'R';  /* registered */
+        if (val == 176) return 'o';  /* degree */
+        if (val == 177) return '+';  /* plus-minus */
+        if (val == 178) return '2';  /* superscript 2 */
+        if (val == 179) return '3';  /* superscript 3 */
+        if (val == 180) return '\''; /* acute accent */
+        if (val == 181) return 'u';  /* micro sign */
+        if (val == 183) return '*';  /* middle dot */
+        if (val == 185) return '1';  /* superscript 1 */
+        if (val == 187) return '>';  /* right double angle quote */
+        if (val == 191) return '?';  /* inverted question mark */
+        /* Latin-1 accented letters */
+        if (val >= 192 && val <= 198) return 'A';
+        if (val == 199) return 'C';
+        if (val >= 200 && val <= 203) return 'E';
+        if (val >= 204 && val <= 207) return 'I';
+        if (val == 208) return 'D';
+        if (val == 209) return 'N';
+        if (val >= 210 && val <= 214) return 'O';
+        if (val == 215) return 'x';  /* multiplication */
+        if (val == 216) return 'O';
+        if (val >= 217 && val <= 220) return 'U';
+        if (val == 221) return 'Y';
+        if (val >= 224 && val <= 230) return 'a';
+        if (val == 231) return 'c';
+        if (val >= 232 && val <= 235) return 'e';
+        if (val >= 236 && val <= 239) return 'i';
+        if (val == 240) return 'd';
+        if (val == 241) return 'n';
+        if (val >= 242 && val <= 246) return 'o';
+        if (val == 247) return '/';  /* division */
+        if (val == 248) return 'o';
+        if (val >= 249 && val <= 252) return 'u';
+        if (val == 253 || val == 255) return 'y';
+        /* Unicode common chars */
         if (val == 8211 || val == 8212) return '-';  /* en/em dash */
         if (val == 8216 || val == 8217) return '\''; /* smart quotes */
+        if (val == 8218) return ',';  /* single low-9 quote */
         if (val == 8220 || val == 8221) return '"';  /* double smart quotes */
+        if (val == 8222) return '"';  /* double low-9 quote */
+        if (val == 8224) return '+';  /* dagger */
+        if (val == 8225) return '+';  /* double dagger */
         if (val == 8226) return '*';  /* bullet */
         if (val == 8230) return '.';  /* ellipsis */
+        if (val == 8240) return '%';  /* per mille */
+        if (val == 8242) return '\''; /* prime */
+        if (val == 8243) return '"';  /* double prime */
+        if (val == 8249) return '<';  /* single left angle quote */
+        if (val == 8250) return '>';  /* single right angle quote */
         if (val == 8364) return 'E';  /* euro */
+        if (val == 8482) return 'T';  /* trademark */
+        if (val == 8592) return '<';  /* left arrow */
+        if (val == 8593) return '^';  /* up arrow */
+        if (val == 8594) return '>';  /* right arrow */
+        if (val == 8595) return 'v';  /* down arrow */
+        if (val == 8596) return '-';  /* left-right arrow */
+        if (val == 8730) return 'v';  /* square root */
+        if (val == 8734) return '8';  /* infinity */
+        if (val == 8776) return '~';  /* almost equal */
+        if (val == 8800) return '!';  /* not equal */
+        if (val == 8804) return '<';  /* less or equal */
+        if (val == 8805) return '>';  /* greater or equal */
+        if (val == 9733 || val == 9734) return '*';  /* star */
+        if (val == 9829) return '<';  /* heart */
+        if (val == 9830) return '*';  /* diamond */
+        if (val == 10003) return 'v'; /* check mark */
+        if (val == 10007) return 'x'; /* ballot X */
         return '?';
     }
 
@@ -1668,23 +2510,29 @@ static void render_html(const char *html, int html_len,
     rs.in_list = 0;
     rs.list_ordered = 0;
     rs.list_item = 0;
+    rs.list_depth = 0;
     rs.in_title = 0;
     rs.in_body = 0;
     rs.in_head = 0;
     rs.in_style = 0;
     rs.in_script = 0;
     rs.centered = 0;
+    rs.right_align = 0;
+    rs.display_none = 0;
     rs.in_table = 0;
     rs.in_table_row = 0;
     rs.table_col = 0;
     rs.table_col_x = 8;
+    rs.table_width = 0;
     rs.color_stack_depth = 0;
+    rs.style_stack_depth = 0;
     rs.link_href[0] = 0;
     rs.link_start_x = 0;
     rs.link_start_y = 0;
     rs.center_defer = 0;
     rs.center_buf_len = 0;
     rs.last_was_block = 1;  /* Suppress leading whitespace */
+    rs.last_char_space = 1; /* Suppress leading whitespace */
 
     /* Apply CSS rules for body if available */
     css_rule_t *body_css = css_lookup("body");
@@ -1694,6 +2542,12 @@ static void render_html(const char *html, int html_len,
     }
     css_rule_t *a_css = css_lookup("a");
     if (a_css && a_css->has_color) rs.link_color = a_css->color;
+    /* Also check HTML tag */
+    css_rule_t *html_css = css_lookup("html");
+    if (html_css) {
+        if (html_css->has_bg_color) rs.bg_color = html_css->bg_color;
+        if (html_css->has_color) rs.text_color = html_css->color;
+    }
 
     /* Clear canvas */
     fill_rect(canvas, cw, ch, 0, 0, cw, ch, rs.bg_color);
@@ -1737,7 +2591,10 @@ static void render_html(const char *html, int html_len,
             int advance;
             char c = decode_entity(html + i, &advance);
             if (!rs.in_title && !rs.in_style && !rs.in_script) {
-                render_char(c);
+                if (c) {
+                    rs.last_was_block = 0;
+                    render_char(c);
+                }
             }
             i += advance;
         } else {
@@ -1756,13 +2613,33 @@ static void render_html(const char *html, int html_len,
                         else if (c == '\t') { for (int t = 0; t < 4; t++) render_char(' '); }
                         else render_char(' ');
                     } else {
-                        /* Collapse whitespace; suppress after block tags */
-                        if (!rs.last_was_block && rs.x > rs.start_x) render_char(' ');
+                        /* Collapse whitespace; suppress after block tags and at start of line */
+                        if (!rs.last_was_block && !rs.last_char_space && rs.x > rs.start_x)
+                            render_char(' ');
                     }
                 } else if (c >= 32) {
                     rs.last_was_block = 0;
-                    /* Render printable chars; map non-ASCII to '?' */
-                    if (c > 126) c = '?';
+                    /* Render printable chars; map non-ASCII to best approximation */
+                    if (c > 126) {
+                        /* Latin-1 approximation */
+                        uint8_t uc = (uint8_t)c;
+                        if (uc >= 0xC0 && uc <= 0xC5) c = 'A';
+                        else if (uc == 0xC7) c = 'C';
+                        else if (uc >= 0xC8 && uc <= 0xCB) c = 'E';
+                        else if (uc >= 0xCC && uc <= 0xCF) c = 'I';
+                        else if (uc == 0xD1) c = 'N';
+                        else if (uc >= 0xD2 && uc <= 0xD6) c = 'O';
+                        else if (uc >= 0xD9 && uc <= 0xDC) c = 'U';
+                        else if (uc >= 0xE0 && uc <= 0xE5) c = 'a';
+                        else if (uc == 0xE7) c = 'c';
+                        else if (uc >= 0xE8 && uc <= 0xEB) c = 'e';
+                        else if (uc >= 0xEC && uc <= 0xEF) c = 'i';
+                        else if (uc == 0xF1) c = 'n';
+                        else if (uc >= 0xF2 && uc <= 0xF6) c = 'o';
+                        else if (uc >= 0xF9 && uc <= 0xFC) c = 'u';
+                        else if (uc == 0xA0) c = ' ';
+                        else c = '?';
+                    }
                     render_char(c);
                 }
             }
@@ -1770,8 +2647,8 @@ static void render_html(const char *html, int html_len,
         }
     }
 
-    /* Flush any pending centered text */
-    if (rs.centered && rs.center_buf_len > 0)
+    /* Flush any pending centered/right-aligned text */
+    if ((rs.centered || rs.right_align) && rs.center_buf_len > 0)
         flush_center_buf();
 
     /* Record total content height for scrollbar */
@@ -1803,7 +2680,7 @@ static const char homepage[] =
     "<p><b>Block:</b> div, p, h1-h6, pre, blockquote, center, table, tr, td, th, ul, ol, li, dl, dt, dd, hr, br</p>"
     "<p><b>Inline:</b> b, strong, i, em, u, s, strike, a, font, span, code, small, big, sup, sub</p>"
     "<p><b>Forms:</b> input (text, submit, checkbox, radio), button, textarea, select</p>"
-    "<p><b>CSS:</b> Inline style attributes (color, font-weight, text-decoration, text-align) and &lt;style&gt; block rules</p>"
+    "<p><b>CSS:</b> Inline style attributes, &lt;style&gt; block rules (element, .class, #id selectors), color, background-color, font-weight, font-style, text-decoration, text-align, display, font-size, margin, padding</p>"
     "<h2>Tips</h2>"
     "<ol>"
     "<li>Enter a URL like <u>http://frogfind.com</u> in the address bar</li>"
