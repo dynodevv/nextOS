@@ -713,6 +713,7 @@ void kernel_main(uint64_t mb_info_addr)
 
         /* Process mouse */
         mouse_state_t ms = mouse_get_state();
+        int scroll = mouse_consume_scroll();
 
         if (installer_active) {
             draw_installer();
@@ -720,7 +721,7 @@ void kernel_main(uint64_t mb_info_addr)
         } else {
             /* Desktop compositor frame */
             compositor_render_frame();
-            compositor_handle_mouse(ms.x, ms.y, ms.buttons);
+            compositor_handle_mouse(ms.x, ms.y, ms.buttons, scroll);
             fb_swap();
         }
 

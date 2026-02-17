@@ -18,6 +18,7 @@ static theme_t  current_theme = THEME_BRUSHED_METAL;
 static int      prev_mouse_buttons = 0;
 static int      start_menu_open = 0;
 static void   (*start_menu_callback)(int item) = (void *)0;
+static int      current_scroll = 0;  /* Scroll delta for current frame */
 
 /* Wallpaper cache to avoid expensive per-frame redraws */
 static uint32_t *wallpaper_cache = (void *)0;
@@ -917,8 +918,9 @@ static void resize_canvas(window_t *w, int new_w, int new_h)
     w->height = new_h;
 }
 
-void compositor_handle_mouse(int mx, int my, int buttons)
+void compositor_handle_mouse(int mx, int my, int buttons, int scroll)
 {
+    current_scroll = scroll;
     int click = (buttons & 1) && !(prev_mouse_buttons & 1);
     int right_click = (buttons & 2) && !(prev_mouse_buttons & 2);
     int release = !(buttons & 1) && (prev_mouse_buttons & 1);
@@ -1152,4 +1154,9 @@ void compositor_handle_key(char ascii, int scancode, int pressed)
 void compositor_toggle_start_menu(void)
 {
     start_menu_open = !start_menu_open;
+}
+
+int compositor_get_scroll(void)
+{
+    return current_scroll;
 }

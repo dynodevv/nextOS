@@ -453,6 +453,22 @@ static void notepad_mouse(window_t *win, int mx, int my, int buttons)
         return;
     }
 
+    /* Handle scroll wheel */
+    int scroll = compositor_get_scroll();
+    if (scroll != 0) {
+        int total_lines = 1;
+        for (int i = 0; i < text_len; i++) {
+            if (text_buf[i] == '\n') total_lines++;
+        }
+        int visible_lines = paper_h / LINE_HEIGHT;
+        if (visible_lines < 1) visible_lines = 1;
+        int max_scroll = (total_lines - visible_lines) * LINE_HEIGHT;
+        if (max_scroll < 0) max_scroll = 0;
+        scroll_y += scroll * LINE_HEIGHT * 3;
+        if (scroll_y < 0) scroll_y = 0;
+        if (scroll_y > max_scroll) scroll_y = max_scroll;
+    }
+
     if (!(buttons & 1)) return;
 
     /* Dialog mode clicks */

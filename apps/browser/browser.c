@@ -3120,6 +3120,17 @@ static void browser_mouse(window_t *win, int mx, int my, int buttons)
         return;
     }
 
+    /* Handle scroll wheel */
+    int scroll = compositor_get_scroll();
+    if (scroll != 0) {
+        int total_h = content_total_h > content_h ? content_total_h : content_h;
+        int max_scroll = total_h - content_h;
+        if (max_scroll < 0) max_scroll = 0;
+        scroll_y += scroll * 40;
+        if (scroll_y < 0) scroll_y = 0;
+        if (scroll_y > max_scroll) scroll_y = max_scroll;
+    }
+
     if (click) {
         int btn_y = 4, btn_h = 24;
 

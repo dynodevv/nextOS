@@ -526,6 +526,14 @@ static void explorer_mouse(window_t *win, int mx, int my, int buttons)
         return;
     }
 
+    /* Handle scroll wheel */
+    int scroll = compositor_get_scroll();
+    if (scroll != 0 && !rename_dialog_active) {
+        scroll_offset += scroll > 0 ? 3 : -3;
+        if (scroll_offset < 0) scroll_offset = 0;
+        if (scroll_offset > max_scroll) scroll_offset = max_scroll;
+    }
+
     /* Rename dialog click handling */
     if (rename_dialog_active && left_click) {
         int dw = 280, dh = 90;

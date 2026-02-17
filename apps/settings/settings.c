@@ -411,6 +411,17 @@ static void settings_mouse(window_t *win, int mx, int my, int buttons)
         return;
     }
 
+    /* Handle scroll wheel for keyboard layout list */
+    int scroll = compositor_get_scroll();
+    if (scroll != 0 && current_tab == TAB_KEYBOARD) {
+        int max_scroll = KB_LAYOUT_COUNT - KB_VISIBLE_ROWS;
+        if (max_scroll > 0) {
+            kb_scroll_offset += scroll > 0 ? 2 : -2;
+            if (kb_scroll_offset < 0) kb_scroll_offset = 0;
+            if (kb_scroll_offset > max_scroll) kb_scroll_offset = max_scroll;
+        }
+    }
+
     if (!(buttons & 1)) return;
 
     /* Tab click */
