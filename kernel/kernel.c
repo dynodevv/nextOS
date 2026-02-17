@@ -14,12 +14,15 @@
 #include "drivers/mouse.h"
 #include "drivers/disk.h"
 #include "drivers/timer.h"
+#include "drivers/net.h"
 #include "gfx/framebuffer.h"
 #include "fs/vfs.h"
+#include "net/net_stack.h"
 #include "ui/compositor.h"
 #include "../apps/settings/settings.h"
 #include "../apps/explorer/explorer.h"
 #include "../apps/notepad/notepad.h"
+#include "../apps/browser/browser.h"
 
 #include <stdint.h>
 
@@ -547,7 +550,7 @@ static void about_paint(window_t *win)
 
     /* Version & info lines */
     const char *lines[] = {
-        "Version 2.0.0",
+        "Version 2.5.0",
         "",
         "A next-generation",
         "operating system.",
@@ -628,9 +631,10 @@ static void launch_app_by_index(int index)
     case 0: settings_launch(); break;
     case 1: explorer_launch(); break;
     case 2: notepad_launch();  break;
-    case 3: launch_about();    break;
-    case 4: system_restart();  break;
-    case 5: system_shutdown(); break;
+    case 3: browser_launch();  break;
+    case 4: launch_about();    break;
+    case 5: system_restart();  break;
+    case 6: system_shutdown(); break;
     }
 }
 
@@ -662,9 +666,14 @@ void kernel_main(uint64_t mb_info_addr)
     keyboard_init();
     mouse_init();
     disk_init();
+    net_init();
 
     /* 6. Filesystem */
     vfs_init();
+
+    /* 6.5 Network stack */
+    if (net_is_available())
+        net_stack_init();
 
     /* 6.5 Check if already installed (marker on disk) */
     if (check_install_marker()) {
@@ -698,6 +707,7 @@ void kernel_main(uint64_t mb_info_addr)
                 if (kev.ctrl && kev.ascii == '1') settings_launch();
                 if (kev.ctrl && kev.ascii == '2') explorer_launch();
                 if (kev.ctrl && kev.ascii == '3') notepad_launch();
+                if (kev.ctrl && kev.ascii == '4') browser_launch();
             }
         }
 

@@ -34,15 +34,19 @@ C_SRCS  := kernel/kernel.c \
            kernel/drivers/mouse.c \
            kernel/drivers/disk.c \
            kernel/drivers/timer.c \
+           kernel/drivers/net.c \
            kernel/gfx/framebuffer.c \
            kernel/fs/vfs.c \
            kernel/fs/fat32.c \
            kernel/fs/ext2.c \
            kernel/fs/ramfs.c \
+           kernel/net/net_stack.c \
+           kernel/net/tls_crypto.c \
            kernel/ui/compositor.c \
            apps/settings/settings.c \
            apps/explorer/explorer.c \
-           apps/notepad/notepad.c
+           apps/notepad/notepad.c \
+           apps/browser/browser.c
 
 # ── Object files ─────────────────────────────────────────────────────────────
 BOOT_OBJ := $(BOOT_S:.S=.o)

@@ -413,8 +413,9 @@ static const desktop_icon_t desktop_icons[] = {
     { "Settings",  0x7090B0 },
     { "Files",     0xD4A840 },
     { "Notepad",   0xE8D860 },
+    { "Browser",   0x3080C0 },
 };
-#define DESKTOP_ICON_COUNT 3
+#define DESKTOP_ICON_COUNT 4
 
 static void draw_desktop_icon(int x, int y, const desktop_icon_t *icon, int selected)
 {
@@ -527,6 +528,76 @@ static void draw_desktop_icon(int x, int y, const desktop_icon_t *icon, int sele
         }
         /* Border */
         fb_draw_rect(px, py, pw, ph, 0x808080);
+    } else if (idx == 3) {
+        /* Browser: Earth globe with cursor */
+        int gr = 20;  /* globe radius */
+        /* Draw globe sphere */
+        for (int dy = -gr; dy <= gr; dy++) {
+            for (int dx = -gr; dx <= gr; dx++) {
+                int d2 = dx * dx + dy * dy;
+                if (d2 <= gr * gr) {
+                    /* Base ocean color with shading */
+                    int shade = 255 - (d2 * 80 / (gr * gr));
+                    uint32_t ocean = rgb(
+                        (uint8_t)(30 * shade / 255),
+                        (uint8_t)(100 * shade / 255),
+                        (uint8_t)(200 * shade / 255));
+                    /* Continent-like patches using simple pattern */
+                    int land = 0;
+                    /* Americas-like landmass */
+                    if (dx >= -8 && dx <= 0 && dy >= -14 && dy <= -4) land = 1;
+                    if (dx >= -6 && dx <= 2 && dy >= -4 && dy <= 8) land = 1;
+                    /* Europe/Africa-like */
+                    if (dx >= 6 && dx <= 14 && dy >= -12 && dy <= -2) land = 1;
+                    if (dx >= 8 && dx <= 16 && dy >= -2 && dy <= 10) land = 1;
+                    /* Clip to circle */
+                    if (d2 > (gr - 2) * (gr - 2)) land = 0;
+                    if (land) {
+                        ocean = rgb(
+                            (uint8_t)(50 * shade / 255),
+                            (uint8_t)(160 * shade / 255),
+                            (uint8_t)(60 * shade / 255));
+                    }
+                    fb_putpixel(cx + dx, cy + dy - 2, ocean);
+                }
+            }
+        }
+        /* Globe highlight (gloss) */
+        for (int dy = -gr; dy <= 0; dy++) {
+            for (int dx = -gr / 2; dx <= gr / 2; dx++) {
+                int d2 = dx * dx + dy * dy;
+                if (d2 <= (gr - 4) * (gr - 4) && dy < -gr / 3) {
+                    uint32_t px2 = fb_getpixel(cx + dx, cy + dy - 2);
+                    fb_putpixel(cx + dx, cy + dy - 2, rgba_blend(px2, 0xFFFFFF, 40));
+                }
+            }
+        }
+        /* Globe outline */
+        for (int dy = -gr - 1; dy <= gr + 1; dy++) {
+            for (int dx = -gr - 1; dx <= gr + 1; dx++) {
+                int d2 = dx * dx + dy * dy;
+                if (d2 >= gr * gr && d2 <= (gr + 1) * (gr + 1))
+                    fb_putpixel(cx + dx, cy + dy - 2, 0x1A4080);
+            }
+        }
+        /* Small cursor arrow at bottom-right of globe */
+        int ax2 = cx + 12, ay2 = cy + 10;
+        /* Cursor shape (small white arrow with black outline) */
+        for (int cr = 0; cr < 12; cr++) {
+            fb_putpixel(ax2, ay2 + cr, 0x000000);      /* left edge */
+        }
+        for (int cr = 0; cr < 8; cr++) {
+            fb_putpixel(ax2 + 1, ay2 + 1 + cr, 0xFFFFFF);
+        }
+        for (int cr = 0; cr < 6; cr++) {
+            fb_putpixel(ax2 + 2, ay2 + 2 + cr, 0xFFFFFF);
+        }
+        for (int cr = 0; cr < 4; cr++) {
+            fb_putpixel(ax2 + 3, ay2 + 3 + cr, 0xFFFFFF);
+        }
+        fb_putpixel(ax2 + 4, ay2 + 4, 0xFFFFFF);
+        fb_putpixel(ax2 + 4, ay2 + 5, 0xFFFFFF);
+        fb_putpixel(ax2 + 5, ay2 + 5, 0x000000);
     }
 
     /* Label below icon */
@@ -559,10 +630,10 @@ static void draw_desktop_icons(void)
 /* ── Start menu ──────────────────────────────────────────────────────── */
 #define START_MENU_W 180
 #define START_MENU_ITEM_H 32
-#define START_MENU_ITEMS 6
+#define START_MENU_ITEMS 7
 
 static const char *start_menu_labels[START_MENU_ITEMS] = {
-    "Settings", "File Explorer", "Notepad",
+    "Settings", "File Explorer", "Notepad", "Browser",
     "About nextOS", "Restart", "Shutdown"
 };
 
@@ -587,19 +658,19 @@ static void draw_start_menu(void)
     /* Items */
     for (int i = 0; i < START_MENU_ITEMS; i++) {
         int iy = my + 4 + i * START_MENU_ITEM_H;
-        if (i >= 3) iy += separator_h;  /* offset items after separator */
+        if (i >= 4) iy += separator_h;  /* offset items after separator */
         fb_draw_string(mx + 12, iy + 8, start_menu_labels[i], tc->taskbar_text, 0x00000000);
         /* Separator line between items (but not after last) */
-        if (i < START_MENU_ITEMS - 1 && i != 2) {
+        if (i < START_MENU_ITEMS - 1 && i != 3) {
             for (int sx = mx + 4; sx < mx + START_MENU_W - 4; sx++)
                 fb_putpixel(sx, iy + START_MENU_ITEM_H - 1,
                             rgba_blend(fb_getpixel(sx, iy + START_MENU_ITEM_H - 1), 0x000000, 30));
         }
     }
 
-    /* Draw thicker separator line between Notepad and About */
+    /* Draw thicker separator line between Browser and About */
     {
-        int sep_y = my + 4 + 3 * START_MENU_ITEM_H;
+        int sep_y = my + 4 + 4 * START_MENU_ITEM_H;
         for (int row = 0; row < separator_h; row++) {
             for (int sx = mx + 4; sx < mx + START_MENU_W - 4; sx++) {
                 if (row == separator_h / 2)
@@ -907,12 +978,12 @@ void compositor_handle_mouse(int mx, int my, int buttons)
                 my >= menu_y && my < menu_y + mh) {
                 int rel_y = my - menu_y - 4;
                 int item;
-                if (rel_y < 3 * START_MENU_ITEM_H) {
+                if (rel_y < 4 * START_MENU_ITEM_H) {
                     item = rel_y / START_MENU_ITEM_H;
-                } else if (rel_y < 3 * START_MENU_ITEM_H + separator_h) {
+                } else if (rel_y < 4 * START_MENU_ITEM_H + separator_h) {
                     item = -1;
                 } else {
-                    item = 3 + (rel_y - 3 * START_MENU_ITEM_H - separator_h) / START_MENU_ITEM_H;
+                    item = 4 + (rel_y - 4 * START_MENU_ITEM_H - separator_h) / START_MENU_ITEM_H;
                 }
                 if (item >= 0 && item < START_MENU_ITEMS) {
                     start_menu_open = 0;
