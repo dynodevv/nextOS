@@ -264,3 +264,7 @@ int keyboard_poll(key_event_t *event)
     kb_read_idx = (kb_read_idx + 1) % KEY_BUF_SIZE;
     return 1;
 }
+
+int keyboard_ctrl_held(void) { return ctrl_held; }
+int keyboard_shift_held(void) { return shift_held; }
+int keyboard_alt_held(void) { return alt_held; }

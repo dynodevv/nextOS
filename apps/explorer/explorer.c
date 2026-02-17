@@ -12,6 +12,7 @@
 #include "kernel/mem/heap.h"
 #include "apps/notepad/notepad.h"
 #include "kernel/drivers/timer.h"
+#include "kernel/drivers/keyboard.h"
 
 /* ── State ────────────────────────────────────────────────────────────── */
 #define MAX_ENTRIES  128
@@ -52,6 +53,7 @@ static int         rename_dialog_active = 0;
 static int         rename_target_index = -1;
 static char        rename_input[VFS_MAX_NAME] = "";
 static int         rename_input_len = 0;
+static int         rename_select_all = 0;
 
 /* Sidebar quick-access folders */
 typedef struct { const char *label; const char *path; } sidebar_item_t;
@@ -99,6 +101,8 @@ static int is_system_path(const char *path)
 #define COL_TEXT_SEL     0xFFFFFF
 #define COL_PATH_BG      0xFFF8E8
 #define COL_SCROLLBAR    0xB0A890
+#define COL_SELECT_HI    0x3399FF   /* CTRL+A selection highlight */
+#define COL_SELECT_TXT   0xFFFFFF   /* Text on selection highlight */
 
 /* ── Helpers ──────────────────────────────────────────────────────────── */
 static int str_len(const char *s) { int n = 0; while (s[n]) n++; return n; }
@@ -447,7 +451,13 @@ static void explorer_paint(window_t *win)
         /* Title */
         canvas_draw_string(win->canvas, cw, ch, dx + 10, dy + 8, "Rename:", COL_TEXT);
         /* Input field */
-        fill_rect(win->canvas, cw, ch, dx + 10, dy + 28, dw - 20, 22, 0xFFFFF0);
+        if (rename_select_all && rename_input_len > 0) {
+            fill_rect(win->canvas, cw, ch, dx + 10, dy + 28, dw - 20, 22, COL_SELECT_HI);
+            canvas_draw_string(win->canvas, cw, ch, dx + 14, dy + 31, rename_input, COL_SELECT_TXT);
+        } else {
+            fill_rect(win->canvas, cw, ch, dx + 10, dy + 28, dw - 20, 22, 0xFFFFF0);
+            canvas_draw_string(win->canvas, cw, ch, dx + 14, dy + 31, rename_input, 0x1A1A1A);
+        }
         /* Input border */
         for (int i = dx + 10; i < dx + dw - 10; i++) {
             win->canvas[(dy + 28) * cw + i] = 0x807060;
@@ -457,7 +467,6 @@ static void explorer_paint(window_t *win)
             win->canvas[i * cw + dx + 10] = 0x807060;
             win->canvas[i * cw + dx + dw - 11] = 0x807060;
         }
-        canvas_draw_string(win->canvas, cw, ch, dx + 14, dy + 31, rename_input, 0x1A1A1A);
         /* OK / Cancel buttons */
         fill_rect(win->canvas, cw, ch, dx + dw - 140, dy + dh - 28, 60, 22, 0xD8D0C0);
         canvas_draw_string(win->canvas, cw, ch, dx + dw - 128, dy + dh - 24, "OK", COL_TEXT);
@@ -524,6 +533,14 @@ static void explorer_mouse(window_t *win, int mx, int my, int buttons)
         return;
     }
 
+    /* Handle scroll wheel */
+    int scroll = compositor_get_scroll();
+    if (scroll != 0 && !rename_dialog_active) {
+        scroll_offset += scroll * 3;
+        if (scroll_offset < 0) scroll_offset = 0;
+        if (scroll_offset > max_scroll) scroll_offset = max_scroll;
+    }
+
     /* Rename dialog click handling */
     if (rename_dialog_active && left_click) {
         int dw = 280, dh = 90;
@@ -545,11 +562,13 @@ static void explorer_mouse(window_t *win, int mx, int my, int buttons)
                 vfs_rename(old_path, new_path);
                 refresh_listing();
             }
+            rename_select_all = 0;
             rename_dialog_active = 0;
         }
         /* Cancel button */
         if (mx >= dx + dw - 70 && mx < dx + dw - 10 &&
             my >= dy + dh - 28 && my < dy + dh - 6) {
+            rename_select_all = 0;
             rename_dialog_active = 0;
         }
         return;
@@ -632,6 +651,7 @@ static void explorer_mouse(window_t *win, int mx, int my, int buttons)
                     if (!protected && ctx_menu_target >= 0) {
                         /* Start rename dialog */
                         rename_dialog_active = 1;
+                        rename_select_all = 0;
                         rename_target_index = ctx_menu_target;
                         rename_input_len = 0;
                         /* Pre-fill with current name */
@@ -823,9 +843,22 @@ static void explorer_key(window_t *win, char ascii, int scancode, int pressed)
 
     /* Rename dialog typing */
     if (rename_dialog_active) {
+        int ctrl = keyboard_ctrl_held();
+        /* CTRL+A: select all in rename input */
+        if (ctrl && scancode == 0x1E) {
+            rename_select_all = 1;
+            return;
+        }
         if (ascii == '\b') {
-            if (rename_input_len > 0) rename_input[--rename_input_len] = 0;
+            if (rename_select_all) {
+                rename_input_len = 0;
+                rename_input[0] = 0;
+                rename_select_all = 0;
+            } else if (rename_input_len > 0) {
+                rename_input[--rename_input_len] = 0;
+            }
         } else if (ascii == '\n') {
+            rename_select_all = 0;
             /* Confirm rename */
             if (rename_input_len > 0 && rename_target_index >= 0) {
                 char old_path[PATH_MAX_LEN];
@@ -844,8 +877,13 @@ static void explorer_key(window_t *win, char ascii, int scancode, int pressed)
             rename_dialog_active = 0;
         } else if (ascii == 27) {
             /* Escape = cancel */
+            rename_select_all = 0;
             rename_dialog_active = 0;
         } else if (ascii >= 32 && rename_input_len < VFS_MAX_NAME - 1) {
+            if (rename_select_all) {
+                rename_input_len = 0;
+                rename_select_all = 0;
+            }
             rename_input[rename_input_len++] = ascii;
             rename_input[rename_input_len] = 0;
         }

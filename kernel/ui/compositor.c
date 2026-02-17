@@ -18,6 +18,7 @@ static theme_t  current_theme = THEME_BRUSHED_METAL;
 static int      prev_mouse_buttons = 0;
 static int      start_menu_open = 0;
 static void   (*start_menu_callback)(int item) = (void *)0;
+static int      current_scroll = 0;  /* Scroll delta for current frame */
 
 /* Wallpaper cache to avoid expensive per-frame redraws */
 static uint32_t *wallpaper_cache = (void *)0;
@@ -917,8 +918,9 @@ static void resize_canvas(window_t *w, int new_w, int new_h)
     w->height = new_h;
 }
 
-void compositor_handle_mouse(int mx, int my, int buttons)
+void compositor_handle_mouse(int mx, int my, int buttons, int scroll)
 {
+    current_scroll = scroll;
     int click = (buttons & 1) && !(prev_mouse_buttons & 1);
     int right_click = (buttons & 2) && !(prev_mouse_buttons & 2);
     int release = !(buttons & 1) && (prev_mouse_buttons & 1);
@@ -996,33 +998,8 @@ void compositor_handle_mouse(int mx, int my, int buttons)
             start_menu_open = 0;
         }
 
-        /* Desktop icon hit test (double-click to open, single click to select) */
-        for (int i = 0; i < DESKTOP_ICON_COUNT; i++) {
-            int ix = ICON_START_X;
-            int iy = ICON_START_Y + i * (ICON_H + ICON_LABEL_GAP);
-            if (mx >= ix - 4 && mx < ix + ICON_W + 4 &&
-                my >= iy - 4 && my < iy + ICON_H + 24) {
-                uint64_t now = timer_get_ticks();
-                if (last_icon_click_idx == i &&
-                    (now - last_icon_click_tick) < DBLCLICK_MS) {
-                    selected_icon = -1;
-                    last_icon_click_idx = -1;
-                    if (start_menu_callback)
-                        start_menu_callback(i);
-                } else {
-                    selected_icon = i;
-                    last_icon_click_tick = now;
-                    last_icon_click_idx = i;
-                }
-                compositor_draw_cursor(mx, my);
-                return;
-            }
-        }
-
-        /* Click on empty desktop deselects icons */
-        selected_icon = -1;
-
-        /* Window hit-test: use z-order-aware helper */
+        /* Window hit-test: use z-order-aware helper (before desktop icons
+         * so clicks cannot pass through windows onto the desktop) */
         window_t *w = window_at(mx, my);
         if (w) {
             int btn_y_center = w->y + TITLEBAR_H / 2;
@@ -1071,11 +1048,13 @@ void compositor_handle_mouse(int mx, int my, int buttons)
                 return;
             }
 
-            /* Title bar drag */
+            /* Title bar drag (disabled when maximized) */
             if (my >= w->y && my < w->y + TITLEBAR_H) {
-                w->dragging = 1;
-                w->drag_ox = mx - w->x;
-                w->drag_oy = my - w->y;
+                if (!w->maximized) {
+                    w->dragging = 1;
+                    w->drag_ox = mx - w->x;
+                    w->drag_oy = my - w->y;
+                }
                 for (int j = 0; j < MAX_WINDOWS; j++)
                     windows[j].focused = 0;
                 w->focused = 1;
@@ -1098,6 +1077,33 @@ void compositor_handle_mouse(int mx, int my, int buttons)
                 return;
             }
         }
+
+        /* Desktop icon hit test (double-click to open, single click to select)
+         * Only reached when no window is under the cursor */
+        for (int i = 0; i < DESKTOP_ICON_COUNT; i++) {
+            int ix = ICON_START_X;
+            int iy = ICON_START_Y + i * (ICON_H + ICON_LABEL_GAP);
+            if (mx >= ix - 4 && mx < ix + ICON_W + 4 &&
+                my >= iy - 4 && my < iy + ICON_H + 24) {
+                uint64_t now = timer_get_ticks();
+                if (last_icon_click_idx == i &&
+                    (now - last_icon_click_tick) < DBLCLICK_MS) {
+                    selected_icon = -1;
+                    last_icon_click_idx = -1;
+                    if (start_menu_callback)
+                        start_menu_callback(i);
+                } else {
+                    selected_icon = i;
+                    last_icon_click_tick = now;
+                    last_icon_click_idx = i;
+                }
+                compositor_draw_cursor(mx, my);
+                return;
+            }
+        }
+
+        /* Click on empty desktop deselects icons */
+        selected_icon = -1;
     }
 
     /* Right-click: forward to window under cursor */
@@ -1148,4 +1154,9 @@ void compositor_handle_key(char ascii, int scancode, int pressed)
 void compositor_toggle_start_menu(void)
 {
     start_menu_open = !start_menu_open;
+}
+
+int compositor_get_scroll(void)
+{
+    return current_scroll;
 }

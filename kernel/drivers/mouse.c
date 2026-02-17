@@ -5,13 +5,14 @@
 #include "mouse.h"
 #include "../arch/x86_64/idt.h"
 
-static mouse_state_t state = {0, 0, 0, 0, 0};
+static mouse_state_t state = {0, 0, 0, 0, 0, 0};
 static int max_x = 1024;
 static int max_y = 768;
 static int mouse_speed = 5;  /* 1-10, default 5 */
 
 static uint8_t mouse_cycle = 0;
-static int8_t  mouse_bytes[3];
+static int8_t  mouse_bytes[4];
+static int     has_scroll_wheel = 0;  /* 1 if Intellimouse mode active */
 
 static void mouse_wait_write(void)
 {
@@ -53,22 +54,39 @@ static void mouse_irq(uint64_t irq, uint64_t err)
         break;
     case 2:
         mouse_bytes[2] = (int8_t)data;
+        if (!has_scroll_wheel) {
+            mouse_cycle = 0;
+        } else {
+            mouse_cycle = 3;
+            break;
+        }
+        goto process_packet;
+    case 3:
+        mouse_bytes[3] = (int8_t)data;
         mouse_cycle = 0;
-
-        state.buttons = mouse_bytes[0] & 0x07;
-        state.dx = (int)mouse_bytes[1] * mouse_speed / 5;
-        state.dy = (-(int)mouse_bytes[2]) * mouse_speed / 5;
-
-        state.x += state.dx;
-        state.y += state.dy;
-
-        /* Clamp to screen bounds */
-        if (state.x < 0)     state.x = 0;
-        if (state.y < 0)     state.y = 0;
-        if (state.x >= max_x) state.x = max_x - 1;
-        if (state.y >= max_y) state.y = max_y - 1;
-        break;
+        goto process_packet;
     }
+    return;
+
+process_packet:
+    state.buttons = mouse_bytes[0] & 0x07;
+    state.dx = (int)mouse_bytes[1] * mouse_speed / 5;
+    state.dy = (-(int)mouse_bytes[2]) * mouse_speed / 5;
+    if (has_scroll_wheel) {
+        int8_t wheel = (int8_t)(mouse_bytes[3] & 0x0F);
+        if (wheel & 0x08)
+            wheel |= (int8_t)0xF0;  /* sign-extend 4-bit value */
+        state.scroll += (int)wheel;
+    }
+
+    state.x += state.dx;
+    state.y += state.dy;
+
+    /* Clamp to screen bounds */
+    if (state.x < 0)     state.x = 0;
+    if (state.y < 0)     state.y = 0;
+    if (state.x >= max_x) state.x = max_x - 1;
+    if (state.y >= max_y) state.y = max_y - 1;
 }
 
 void mouse_init(void)
@@ -89,6 +107,21 @@ void mouse_init(void)
 
     /* Use default settings and enable streaming */
     mouse_write(0xF6); mouse_wait_read(); inb(0x60);
+
+    /* Enable Intellimouse scroll wheel: magic sample rate sequence 200,100,80 */
+    mouse_write(0xF3); mouse_wait_read(); inb(0x60);
+    mouse_write(200);  mouse_wait_read(); inb(0x60);
+    mouse_write(0xF3); mouse_wait_read(); inb(0x60);
+    mouse_write(100);  mouse_wait_read(); inb(0x60);
+    mouse_write(0xF3); mouse_wait_read(); inb(0x60);
+    mouse_write(80);   mouse_wait_read(); inb(0x60);
+
+    /* Get device ID to check if scroll wheel is available */
+    mouse_write(0xF2); mouse_wait_read(); inb(0x60);  /* ACK */
+    mouse_wait_read();
+    uint8_t id = inb(0x60);
+    has_scroll_wheel = (id == 3 || id == 4);  /* 3 = Intellimouse, 4 = 5-button */
+
     /* Set sample rate to 200 for smoother tracking */
     mouse_write(0xF3); mouse_wait_read(); inb(0x60);
     mouse_write(200);  mouse_wait_read(); inb(0x60);
@@ -100,6 +133,15 @@ void mouse_init(void)
 mouse_state_t mouse_get_state(void)
 {
     return state;
+}
+
+int mouse_consume_scroll(void)
+{
+    cli();
+    int s = state.scroll;
+    state.scroll = 0;
+    sti();
+    return s;
 }
 
 void mouse_set_bounds(int mx, int my)

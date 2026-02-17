@@ -19,6 +19,7 @@
 #include "kernel/net/net_stack.h"
 #include "kernel/drivers/timer.h"
 #include "kernel/mem/heap.h"
+#include "kernel/drivers/keyboard.h"
 
 /* ── String Helpers (freestanding) ───────────────────────────────────── */
 static int str_len(const char *s) { int n = 0; while (s[n]) n++; return n; }
@@ -139,10 +140,14 @@ static window_t *browser_win = 0;
 #define STATUS_H     20
 #define SCROLLBAR_W  14
 #define NAV_BTN_W    28
+#define COL_SELECT_BG  0x3399FF
+#define COL_SELECT_TXT 0xFFFFFF
 
 static char url_bar[URL_MAX];
 static int  url_cursor = 0;
 static int  url_focused = 1;
+static int  url_select_all = 0;       /* URL bar select-all flag */
+static int  input_select_all = 0;     /* Form input select-all flag */
 
 static char page_buf[PAGE_BUF_SIZE];
 static int  page_len = 0;
@@ -1594,10 +1599,12 @@ static void handle_tag(const char *tag, int tag_len)
                     /* Display value or placeholder */
                     const char *txt;
                     uint32_t txt_color;
+                    int show_input_sel = (is_focused && input_select_all &&
+                                         fi_idx >= 0 && form_inputs[fi_idx].value[0]);
                     /* Always show the current stored value (which includes user-typed text) */
                     if (fi_idx >= 0 && form_inputs[fi_idx].value[0]) {
                         txt = form_inputs[fi_idx].value;
-                        txt_color = 0x1A1A1A;
+                        txt_color = show_input_sel ? COL_SELECT_TXT : 0x1A1A1A;
                     } else if (placeholder[0]) {
                         txt = placeholder;
                         txt_color = 0xA0A0A0;
@@ -1613,6 +1620,10 @@ static void handle_tag(const char *tag, int tag_len)
                         while (txt[ci2] && ci2 < max_txt && ci2 < 79)
                             { clipped[ci2] = txt[ci2]; ci2++; }
                         clipped[ci2] = 0;
+                        /* Selection highlight */
+                        if (show_input_sel)
+                            fill_rect(rs.canvas, rs.cw, rs.ch, rs.x + 2, draw_y + 2,
+                                      ci2 * 8 + 4, 18, COL_SELECT_BG);
                         canvas_draw_string(rs.canvas, rs.cw, rs.ch, rs.x + 4, draw_y + 3,
                                            clipped, txt_color);
                     }
@@ -2983,9 +2994,20 @@ static void browser_paint(window_t *win)
     int start = 0;
     if (url_cursor > max_chars - 2)
         start = url_cursor - max_chars + 2;
-    for (int ci = start; url_bar[ci] && (ci - start) < max_chars; ci++) {
-        canvas_draw_char(win->canvas, cw, ch,
-                         url_x + 4 + (ci - start) * 8, btn_y + 4, url_bar[ci], 0x1A1A1A);
+    /* Selection highlight for URL bar */
+    if (url_select_all && url_bar[0]) {
+        int sel_len = 0;
+        for (int ci = start; url_bar[ci] && (ci - start) < max_chars; ci++) sel_len++;
+        if (sel_len > 0)
+            fill_rect(win->canvas, cw, ch, url_x + 4, btn_y + 2,
+                      sel_len * 8, btn_h - 4, COL_SELECT_BG);
+    }
+    {
+        uint32_t url_text_color = (url_select_all && url_bar[0]) ? COL_SELECT_TXT : 0x1A1A1A;
+        for (int ci = start; url_bar[ci] && (ci - start) < max_chars; ci++) {
+            canvas_draw_char(win->canvas, cw, ch,
+                             url_x + 4 + (ci - start) * 8, btn_y + 4, url_bar[ci], url_text_color);
+        }
     }
 
     /* Cursor blink */
@@ -3117,6 +3139,17 @@ static void browser_mouse(window_t *win, int mx, int my, int buttons)
         return;
     }
 
+    /* Handle scroll wheel */
+    int scroll = compositor_get_scroll();
+    if (scroll != 0) {
+        int total_h = content_total_h > content_h ? content_total_h : content_h;
+        int max_scroll = total_h - content_h;
+        if (max_scroll < 0) max_scroll = 0;
+        scroll_y += scroll * 40;
+        if (scroll_y < 0) scroll_y = 0;
+        if (scroll_y > max_scroll) scroll_y = max_scroll;
+    }
+
     if (click) {
         int btn_y = 4, btn_h = 24;
 
@@ -3148,6 +3181,7 @@ static void browser_mouse(window_t *win, int mx, int my, int buttons)
         int url_w = go_x - bx - 4;
         if (my >= btn_y && my < btn_y + btn_h && mx >= url_x && mx < url_x + url_w) {
             url_focused = 1;
+            url_select_all = 0;
             int rel_x = mx - url_x - 4;
             url_cursor = rel_x / 8;
             int len = str_len(url_bar);
@@ -3194,6 +3228,7 @@ static void browser_mouse(window_t *win, int mx, int my, int buttons)
         /* Content area click */
         if (my >= TOOLBAR_H && my < ch - STATUS_H && mx < cw - SCROLLBAR_W) {
             url_focused = 0;
+            url_select_all = 0;
             /* Translate to content coordinates (account for scroll) */
             int content_click_y = my - TOOLBAR_H + scroll_y;
             int content_click_x = mx;
@@ -3207,6 +3242,7 @@ static void browser_mouse(window_t *win, int mx, int my, int buttons)
                         str_cpy(url_bar, lr->href);
                         url_cursor = str_len(url_bar);
                         focused_input = -1;
+                        input_select_all = 0;
                         navigate(lr->href);
                         return;
                     }
@@ -3230,9 +3266,12 @@ static void browser_mouse(window_t *win, int mx, int my, int buttons)
                     break;
                 }
             }
+            if (clicked_input != focused_input)
+                input_select_all = 0;
             focused_input = clicked_input;
         } else if (my >= TOOLBAR_H) {
             url_focused = 0;
+            url_select_all = 0;
         }
     }
 
@@ -3259,6 +3298,7 @@ static void browser_mouse(window_t *win, int mx, int my, int buttons)
 static void browser_key(window_t *win, char ascii, int scancode, int pressed)
 {
     if (!win || !pressed) return;
+    int ctrl = keyboard_ctrl_held();
 
     /* F5 = Refresh */
     if (scancode == 0x3F) {
@@ -3267,15 +3307,25 @@ static void browser_key(window_t *win, char ascii, int scancode, int pressed)
     }
 
     if (url_focused) {
+        /* CTRL+A: select all in URL bar */
+        if (ctrl && scancode == 0x1E) {
+            url_select_all = 1;
+            return;
+        }
         if (ascii == '\n' || ascii == '\r') {
             /* Navigate on Enter */
+            url_select_all = 0;
             url_focused = 0;
             navigate(url_bar);
             return;
         }
         if (ascii == '\b' || scancode == 0x0E) {
             /* Backspace */
-            if (url_cursor > 0) {
+            if (url_select_all) {
+                url_bar[0] = 0;
+                url_cursor = 0;
+                url_select_all = 0;
+            } else if (url_cursor > 0) {
                 int len = str_len(url_bar);
                 for (int i = url_cursor - 1; i < len; i++)
                     url_bar[i] = url_bar[i + 1];
@@ -3285,27 +3335,40 @@ static void browser_key(window_t *win, char ascii, int scancode, int pressed)
         }
         /* Delete key */
         if (scancode == 0x53) {
-            int len = str_len(url_bar);
-            if (url_cursor < len) {
-                for (int i = url_cursor; i < len; i++)
-                    url_bar[i] = url_bar[i + 1];
+            if (url_select_all) {
+                url_bar[0] = 0;
+                url_cursor = 0;
+                url_select_all = 0;
+            } else {
+                int len = str_len(url_bar);
+                if (url_cursor < len) {
+                    for (int i = url_cursor; i < len; i++)
+                        url_bar[i] = url_bar[i + 1];
+                }
             }
             return;
         }
         /* Left/Right arrow in URL bar */
         if (scancode == 0x4B) { /* Left */
+            url_select_all = 0;
             if (url_cursor > 0) url_cursor--;
             return;
         }
         if (scancode == 0x4D) { /* Right */
+            url_select_all = 0;
             if (url_cursor < str_len(url_bar)) url_cursor++;
             return;
         }
         /* Home/End in URL bar */
-        if (scancode == 0x47) { url_cursor = 0; return; }
-        if (scancode == 0x4F) { url_cursor = str_len(url_bar); return; }
+        if (scancode == 0x47) { url_select_all = 0; url_cursor = 0; return; }
+        if (scancode == 0x4F) { url_select_all = 0; url_cursor = str_len(url_bar); return; }
 
         if (ascii >= 32 && ascii <= 126) {
+            if (url_select_all) {
+                url_bar[0] = 0;
+                url_cursor = 0;
+                url_select_all = 0;
+            }
             int len = str_len(url_bar);
             if (len < URL_MAX - 1) {
                 /* Insert character at cursor */
@@ -3322,18 +3385,30 @@ static void browser_key(window_t *win, char ascii, int scancode, int pressed)
     if (focused_input >= 0 && focused_input < form_input_count) {
         form_input_t *fi = &form_inputs[focused_input];
         if (!fi->is_submit) {
+            /* CTRL+A: select all in form input */
+            if (ctrl && scancode == 0x1E) {
+                input_select_all = 1;
+                return;
+            }
             if (ascii == '\n' || ascii == '\r') {
                 /* Enter in text input: submit form */
+                input_select_all = 0;
                 submit_form();
                 return;
             }
             if (ascii == '\b' || scancode == 0x0E) {
-                int len = str_len(fi->value);
-                if (len > 0) fi->value[len - 1] = 0;
+                if (input_select_all) {
+                    fi->value[0] = 0;
+                    input_select_all = 0;
+                } else {
+                    int len = str_len(fi->value);
+                    if (len > 0) fi->value[len - 1] = 0;
+                }
                 return;
             }
             if (ascii == '\t') {
                 /* Tab to next input */
+                input_select_all = 0;
                 focused_input++;
                 while (focused_input < form_input_count && form_inputs[focused_input].is_submit)
                     focused_input++;
@@ -3341,6 +3416,10 @@ static void browser_key(window_t *win, char ascii, int scancode, int pressed)
                 return;
             }
             if (ascii >= 32 && ascii <= 126) {
+                if (input_select_all) {
+                    fi->value[0] = 0;
+                    input_select_all = 0;
+                }
                 int len = str_len(fi->value);
                 if (len < FORM_INPUT_MAX - 1) {
                     fi->value[len] = ascii;
