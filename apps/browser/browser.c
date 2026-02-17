@@ -3181,6 +3181,7 @@ static void browser_mouse(window_t *win, int mx, int my, int buttons)
         int url_w = go_x - bx - 4;
         if (my >= btn_y && my < btn_y + btn_h && mx >= url_x && mx < url_x + url_w) {
             url_focused = 1;
+            url_select_all = 0;
             int rel_x = mx - url_x - 4;
             url_cursor = rel_x / 8;
             int len = str_len(url_bar);
@@ -3227,6 +3228,7 @@ static void browser_mouse(window_t *win, int mx, int my, int buttons)
         /* Content area click */
         if (my >= TOOLBAR_H && my < ch - STATUS_H && mx < cw - SCROLLBAR_W) {
             url_focused = 0;
+            url_select_all = 0;
             /* Translate to content coordinates (account for scroll) */
             int content_click_y = my - TOOLBAR_H + scroll_y;
             int content_click_x = mx;
@@ -3240,6 +3242,7 @@ static void browser_mouse(window_t *win, int mx, int my, int buttons)
                         str_cpy(url_bar, lr->href);
                         url_cursor = str_len(url_bar);
                         focused_input = -1;
+                        input_select_all = 0;
                         navigate(lr->href);
                         return;
                     }
@@ -3263,9 +3266,12 @@ static void browser_mouse(window_t *win, int mx, int my, int buttons)
                     break;
                 }
             }
+            if (clicked_input != focused_input)
+                input_select_all = 0;
             focused_input = clicked_input;
         } else if (my >= TOOLBAR_H) {
             url_focused = 0;
+            url_select_all = 0;
         }
     }
 

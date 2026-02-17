@@ -536,7 +536,7 @@ static void explorer_mouse(window_t *win, int mx, int my, int buttons)
     /* Handle scroll wheel */
     int scroll = compositor_get_scroll();
     if (scroll != 0 && !rename_dialog_active) {
-        scroll_offset += scroll > 0 ? 3 : -3;
+        scroll_offset += scroll * 3;
         if (scroll_offset < 0) scroll_offset = 0;
         if (scroll_offset > max_scroll) scroll_offset = max_scroll;
     }
@@ -562,11 +562,13 @@ static void explorer_mouse(window_t *win, int mx, int my, int buttons)
                 vfs_rename(old_path, new_path);
                 refresh_listing();
             }
+            rename_select_all = 0;
             rename_dialog_active = 0;
         }
         /* Cancel button */
         if (mx >= dx + dw - 70 && mx < dx + dw - 10 &&
             my >= dy + dh - 28 && my < dy + dh - 6) {
+            rename_select_all = 0;
             rename_dialog_active = 0;
         }
         return;
@@ -649,6 +651,7 @@ static void explorer_mouse(window_t *win, int mx, int my, int buttons)
                     if (!protected && ctx_menu_target >= 0) {
                         /* Start rename dialog */
                         rename_dialog_active = 1;
+                        rename_select_all = 0;
                         rename_target_index = ctx_menu_target;
                         rename_input_len = 0;
                         /* Pre-fill with current name */

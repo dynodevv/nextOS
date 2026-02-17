@@ -72,8 +72,12 @@ process_packet:
     state.buttons = mouse_bytes[0] & 0x07;
     state.dx = (int)mouse_bytes[1] * mouse_speed / 5;
     state.dy = (-(int)mouse_bytes[2]) * mouse_speed / 5;
-    if (has_scroll_wheel)
-        state.scroll += (int)mouse_bytes[3];
+    if (has_scroll_wheel) {
+        int8_t wheel = (int8_t)(mouse_bytes[3] & 0x0F);
+        if (wheel & 0x08)
+            wheel |= (int8_t)0xF0;  /* sign-extend 4-bit value */
+        state.scroll += (int)wheel;
+    }
 
     state.x += state.dx;
     state.y += state.dy;
@@ -133,8 +137,10 @@ mouse_state_t mouse_get_state(void)
 
 int mouse_consume_scroll(void)
 {
+    cli();
     int s = state.scroll;
     state.scroll = 0;
+    sti();
     return s;
 }
 

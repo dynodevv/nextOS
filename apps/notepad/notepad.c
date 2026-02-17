@@ -605,6 +605,7 @@ static void notepad_mouse(window_t *win, int mx, int my, int buttons)
 
     /* Click in text area to position cursor */
     if (my >= 36) {
+        select_all_active = 0;
         int line_click = (my - 36 + scroll_y) / LINE_HEIGHT;
         int col_click  = (mx - 50) / CHAR_WIDTH;
         if (col_click < 0) col_click = 0;
