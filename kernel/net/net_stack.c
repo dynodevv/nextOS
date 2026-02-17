@@ -639,10 +639,9 @@ int tcp_receive_data(void *buf, int buf_size, int timeout_ms)
 
         if (received > 0 && tcp_rx_tail == tcp_rx_head) {
             /* Got some data and buffer empty, wait for more but respect timeout */
-            uint64_t remaining_ms = 0;
             uint64_t elapsed = timer_get_ticks() - start;
-            if (elapsed < (uint64_t)timeout_ms)
-                remaining_ms = (uint64_t)timeout_ms - elapsed;
+            if (elapsed >= (uint64_t)timeout_ms) break;
+            uint64_t remaining_ms = (uint64_t)timeout_ms - elapsed;
             uint64_t inter_wait = (remaining_ms < 500) ? remaining_ms : 500;
             uint64_t wait_start = timer_get_ticks();
             while (timer_get_ticks() - wait_start < inter_wait) {

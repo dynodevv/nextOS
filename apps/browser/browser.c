@@ -2819,7 +2819,7 @@ static void navigate_internal(const char *url, int push_history)
     {
         int slen = str_len(status_msg);
         int hlen = str_len(purl.host);
-        int avail = (int)sizeof(status_msg) - slen - 4; /* room for "..." + NUL */
+        int avail = (int)sizeof(status_msg) - slen - 4; /* room for "..." (3) + NUL (1) */
         if (hlen > avail) hlen = avail;
         for (int i = 0; i < hlen; i++) status_msg[slen + i] = purl.host[i];
         status_msg[slen + hlen] = 0;
