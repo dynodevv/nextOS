@@ -148,7 +148,7 @@ static uint64_t start_menu_anim_start = 0;
 /* Ease-out cubic: 1 - (1-t)^3, returns 0..1000 */
 static int ease_out_cubic(uint64_t elapsed_ms, int duration_ms)
 {
-    if ((int)elapsed_ms >= duration_ms) return 1000;
+    if (duration_ms <= 0 || elapsed_ms >= (uint64_t)duration_ms) return 1000;
     if (elapsed_ms == 0) return 0;
     int t = (int)(elapsed_ms * 1000 / (uint64_t)duration_ms);
     int inv = 1000 - t;
