@@ -1122,6 +1122,7 @@ void compositor_render_frame(void)
             windows[i].anim_type = ANIM_NONE;
             break;
         case ANIM_UNMINIMIZE:
+            windows[i].minimized = 0;
             windows[i].anim_type = ANIM_NONE;
             break;
         case ANIM_MAXIMIZE:
@@ -1263,7 +1264,6 @@ void compositor_handle_mouse(int mx, int my, int buttons, int scroll)
                 if (!windows[i].active) continue;
                 if (mx >= bx && mx < bx + 120) {
                     if (windows[i].minimized) {
-                        windows[i].minimized = 0;
                         windows[i].anim_type = ANIM_UNMINIMIZE;
                         windows[i].anim_start = timer_get_ticks();
                         windows[i].anim_from_x = bx;
