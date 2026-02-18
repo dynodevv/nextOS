@@ -49,6 +49,8 @@ struct window_s {
     uint64_t anim_start;
     int      anim_from_x, anim_from_y;
     int      anim_to_x, anim_to_y;
+    int      anim_from_w, anim_from_h;
+    int      anim_to_w, anim_to_h;
 
     /* Callback: called each frame so the app can draw into canvas */
     void (*on_paint)(window_t *self);
@@ -66,6 +68,7 @@ void      compositor_destroy_window(window_t *win);
 void      compositor_render_frame(void);
 void      compositor_handle_mouse(int mx, int my, int buttons, int scroll);
 int       compositor_get_scroll(void);
+int       compositor_get_smooth_scroll(void);
 void      compositor_handle_key(char ascii, int scancode, int pressed);
 void      compositor_set_app_launcher(void (*callback)(int item));
 void      compositor_toggle_start_menu(void);

@@ -20,6 +20,10 @@ static int      start_menu_open = 0;
 static void   (*start_menu_callback)(int item) = (void *)0;
 static int      current_scroll = 0;  /* Scroll delta for current frame */
 
+/* Smooth scroll state */
+static int      smooth_scroll_target = 0;
+static int      smooth_scroll_current = 0;  /* Fixed-point x256 */
+
 /* Wallpaper cache to avoid expensive per-frame redraws */
 static uint32_t *wallpaper_cache = (void *)0;
 static int       wallpaper_dirty = 1;
@@ -336,22 +340,64 @@ static void draw_window(window_t *win)
         case ANIM_MINIMIZE:
             x = anim_lerp(win->anim_from_x, win->anim_to_x, p);
             y = anim_lerp(win->anim_from_y, win->anim_to_y, p);
+            w = anim_lerp(win->anim_from_w, win->anim_to_w, p);
+            h = anim_lerp(win->anim_from_h, win->anim_to_h, p);
+            if (w < 4) w = 4;
+            if (h < 4) h = 4;
             anim_alpha = (uint8_t)(255 - p * 255 / 1000);
             if ((int)elapsed >= duration) return;
             break;
         case ANIM_UNMINIMIZE:
             x = anim_lerp(win->anim_from_x, win->anim_to_x, p);
             y = anim_lerp(win->anim_from_y, win->anim_to_y, p);
+            w = anim_lerp(win->anim_from_w, win->anim_to_w, p);
+            h = anim_lerp(win->anim_from_h, win->anim_to_h, p);
+            if (w < 4) w = 4;
+            if (h < 4) h = 4;
             anim_alpha = (uint8_t)(p * 255 / 1000);
             break;
         case ANIM_MAXIMIZE:
+            x = anim_lerp(win->anim_from_x, win->anim_to_x, p);
+            y = anim_lerp(win->anim_from_y, win->anim_to_y, p);
+            w = anim_lerp(win->anim_from_w, win->anim_to_w, p);
+            h = anim_lerp(win->anim_from_h, win->anim_to_h, p);
+            if (w < 4) w = 4;
+            if (h < 4) h = 4;
+            break;
         case ANIM_RESTORE:
-            anim_alpha = (uint8_t)(p * 255 / 1000);
+            x = anim_lerp(win->anim_from_x, win->anim_to_x, p);
+            y = anim_lerp(win->anim_from_y, win->anim_to_y, p);
+            w = anim_lerp(win->anim_from_w, win->anim_to_w, p);
+            h = anim_lerp(win->anim_from_h, win->anim_to_h, p);
+            if (w < 4) w = 4;
+            if (h < 4) h = 4;
             break;
         }
     }
 
     int total_h = h + TITLEBAR_H;
+    framebuffer_t *fb = fb_get();
+    int fw = (int)fb->width, fh = (int)fb->height;
+
+    /* Save background behind the window region for proper alpha blending */
+    int save_x0 = x - 1, save_y0 = y - 1;
+    int save_w = w + 10, save_h = total_h + 10;
+    if (save_x0 < 0) save_x0 = 0;
+    if (save_y0 < 0) save_y0 = 0;
+    if (save_x0 + save_w > fw) save_w = fw - save_x0;
+    if (save_y0 + save_h > fh) save_h = fh - save_y0;
+
+    uint32_t *bg_save = (void *)0;
+    if (anim_alpha < 255 && save_w > 0 && save_h > 0) {
+        bg_save = (uint32_t *)kmalloc(save_w * save_h * 4);
+        if (bg_save) {
+            for (int r = 0; r < save_h; r++) {
+                for (int c = 0; c < save_w; c++) {
+                    bg_save[r * save_w + c] = fb_getpixel(save_x0 + c, save_y0 + r);
+                }
+            }
+        }
+    }
 
     /* Drop shadow */
     draw_shadow(x, y, w, total_h, tc->shadow);
@@ -399,12 +445,20 @@ static void draw_window(window_t *win)
 
     /* Blit client canvas onto the window's client area */
     if (win->canvas) {
-        int cw = w - BORDER_W * 2;
-        int ch = h - BORDER_W * 2;
-        for (int row = 0; row < ch; row++) {
-            for (int col = 0; col < cw; col++) {
-                fb_putpixel(x + BORDER_W + col, cy + BORDER_W + row,
-                            win->canvas[row * cw + col]);
+        int cw = win->width - BORDER_W * 2;
+        int ch = win->height - BORDER_W * 2;
+        int draw_cw = w - BORDER_W * 2;
+        int draw_ch = h - BORDER_W * 2;
+        if (draw_cw > 0 && draw_ch > 0) {
+            for (int row = 0; row < draw_ch; row++) {
+                int src_row = row * ch / draw_ch;
+                if (src_row >= ch) src_row = ch - 1;
+                for (int col = 0; col < draw_cw; col++) {
+                    int src_col = col * cw / draw_cw;
+                    if (src_col >= cw) src_col = cw - 1;
+                    fb_putpixel(x + BORDER_W + col, cy + BORDER_W + row,
+                                win->canvas[src_row * cw + src_col]);
+                }
             }
         }
     }
@@ -420,21 +474,26 @@ static void draw_window(window_t *win)
         }
     }
 
-    /* Animation fade overlay — blends drawn window back towards wallpaper */
-    if (anim_alpha < 255) {
-        framebuffer_t *fb = fb_get();
-        int fw = (int)fb->width, fh = (int)fb->height;
+    /* Animation alpha blend — blend drawn window with saved background */
+    if (anim_alpha < 255 && bg_save) {
         uint8_t inv = 255 - anim_alpha;
+        for (int r = 0; r < save_h; r++) {
+            for (int c = 0; c < save_w; c++) {
+                int px = save_x0 + c, py = save_y0 + r;
+                uint32_t bg_px = bg_save[r * save_w + c];
+                uint32_t win_px = fb_getpixel(px, py);
+                fb_putpixel(px, py, rgba_blend(win_px, bg_px, inv));
+            }
+        }
+        kfree(bg_save);
+    } else if (anim_alpha < 255) {
+        /* Fallback if allocation failed — blend toward black */
         for (int row = -1; row < total_h + 5; row++) {
             for (int col = -1; col < w + 5; col++) {
                 int px = x + col, py = y + row;
                 if (px < 0 || py < 0 || px >= fw || py >= fh) continue;
-                uint32_t wp = 0x000000;
-                if (wallpaper_cache && (uint32_t)px < wallpaper_w &&
-                    (uint32_t)py < wallpaper_h)
-                    wp = wallpaper_cache[py * wallpaper_w + px];
                 uint32_t cur = fb_getpixel(px, py);
-                fb_putpixel(px, py, rgba_blend(cur, wp, inv));
+                fb_putpixel(px, py, rgba_blend(cur, 0x000000, 255 - anim_alpha));
             }
         }
     }
@@ -799,7 +858,7 @@ static void draw_start_menu(void)
         }
     }
 
-    /* Fade overlay for animation */
+    /* Fade overlay for animation — blend with saved background */
     if (sm_alpha < 255) {
         int fw = (int)f->width, fh = (int)f->height;
         uint8_t inv = 255 - sm_alpha;
@@ -807,12 +866,12 @@ static void draw_start_menu(void)
             for (int col = -1; col < START_MENU_W + 5; col++) {
                 int px = mx + col, py = my + row;
                 if (px < 0 || py < 0 || px >= fw || py >= fh) continue;
-                uint32_t wp = 0x000000;
+                uint32_t cur = fb_getpixel(px, py);
+                uint32_t bg = 0x000000;
                 if (wallpaper_cache && (uint32_t)px < wallpaper_w &&
                     (uint32_t)py < wallpaper_h)
-                    wp = wallpaper_cache[py * wallpaper_w + px];
-                uint32_t cur = fb_getpixel(px, py);
-                fb_putpixel(px, py, rgba_blend(cur, wp, inv));
+                    bg = wallpaper_cache[py * wallpaper_w + px];
+                fb_putpixel(px, py, rgba_blend(cur, bg, inv));
             }
         }
     }
@@ -1107,6 +1166,24 @@ static void resize_canvas(window_t *w, int new_w, int new_h)
 void compositor_handle_mouse(int mx, int my, int buttons, int scroll)
 {
     current_scroll = scroll;
+
+    /* Smooth scroll: accumulate target, interpolate each frame */
+    if (scroll != 0)
+        smooth_scroll_target += scroll * 256;
+    /* Interpolate toward target (ease ~30% per frame at 120fps) */
+    if (smooth_scroll_current != smooth_scroll_target) {
+        int diff = smooth_scroll_target - smooth_scroll_current;
+        int step = diff * 3 / 10;
+        if (step == 0) step = (diff > 0) ? 1 : -1;
+        smooth_scroll_current += step;
+        /* Snap when close enough */
+        int remaining = smooth_scroll_target - smooth_scroll_current;
+        if (remaining < 0) remaining = -remaining;
+        if (remaining < 4) {
+            smooth_scroll_current = smooth_scroll_target;
+        }
+    }
+
     int click = (buttons & 1) && !(prev_mouse_buttons & 1);
     int right_click = (buttons & 2) && !(prev_mouse_buttons & 2);
     int release = !(buttons & 1) && (prev_mouse_buttons & 1);
@@ -1158,8 +1235,12 @@ void compositor_handle_mouse(int mx, int my, int buttons, int scroll)
                         windows[i].anim_start = timer_get_ticks();
                         windows[i].anim_from_x = bx;
                         windows[i].anim_from_y = (int)f->height - TASKBAR_H;
+                        windows[i].anim_from_w = 120;
+                        windows[i].anim_from_h = 4;
                         windows[i].anim_to_x = windows[i].x;
                         windows[i].anim_to_y = windows[i].y;
+                        windows[i].anim_to_w = windows[i].width;
+                        windows[i].anim_to_h = windows[i].height;
                     }
                     for (int j = 0; j < MAX_WINDOWS; j++)
                         windows[j].focused = 0;
@@ -1219,25 +1300,45 @@ void compositor_handle_mouse(int mx, int my, int buttons, int scroll)
             int max_cx = w->x + w->width - 36;
             if ((mx - max_cx) * (mx - max_cx) + (my - btn_y_center) * (my - btn_y_center) <= 49) {
                 if (w->maximized) {
-                    /* Restore */
+                    /* Restore — animate from maximized to original */
+                    int from_x = w->x, from_y = w->y;
+                    int from_w = w->width, from_h = w->height;
                     w->x = w->orig_x;
                     w->y = w->orig_y;
                     resize_canvas(w, w->orig_w, w->orig_h);
                     w->maximized = 0;
                     w->anim_type = ANIM_RESTORE;
                     w->anim_start = timer_get_ticks();
+                    w->anim_from_x = from_x;
+                    w->anim_from_y = from_y;
+                    w->anim_from_w = from_w;
+                    w->anim_from_h = from_h;
+                    w->anim_to_x = w->x;
+                    w->anim_to_y = w->y;
+                    w->anim_to_w = w->width;
+                    w->anim_to_h = w->height;
                 } else {
-                    /* Maximize */
+                    /* Maximize — animate from original to maximized */
                     w->orig_x = w->x;
                     w->orig_y = w->y;
                     w->orig_w = w->width;
                     w->orig_h = w->height;
-                    w->x = 0;
-                    w->y = 0;
-                    resize_canvas(w, (int)f->width, (int)f->height - TASKBAR_H - TITLEBAR_H);
-                    w->maximized = 1;
+                    int new_w = (int)f->width;
+                    int new_h = (int)f->height - TASKBAR_H - TITLEBAR_H;
                     w->anim_type = ANIM_MAXIMIZE;
                     w->anim_start = timer_get_ticks();
+                    w->anim_from_x = w->x;
+                    w->anim_from_y = w->y;
+                    w->anim_from_w = w->width;
+                    w->anim_from_h = w->height;
+                    w->anim_to_x = 0;
+                    w->anim_to_y = 0;
+                    w->anim_to_w = new_w;
+                    w->anim_to_h = new_h;
+                    w->x = 0;
+                    w->y = 0;
+                    resize_canvas(w, new_w, new_h);
+                    w->maximized = 1;
                 }
                 for (int j = 0; j < MAX_WINDOWS; j++)
                     windows[j].focused = 0;
@@ -1254,8 +1355,12 @@ void compositor_handle_mouse(int mx, int my, int buttons, int scroll)
                 w->anim_start = timer_get_ticks();
                 w->anim_from_x = w->x;
                 w->anim_from_y = w->y;
+                w->anim_from_w = w->width;
+                w->anim_from_h = w->height;
                 w->anim_to_x = taskbar_button_x_for(w);
                 w->anim_to_y = (int)f->height - TASKBAR_H;
+                w->anim_to_w = 120;
+                w->anim_to_h = 4;
                 compositor_draw_cursor(mx, my);
                 return;
             }
@@ -1379,4 +1484,15 @@ void compositor_toggle_start_menu(void)
 int compositor_get_scroll(void)
 {
     return current_scroll;
+}
+
+int compositor_get_smooth_scroll(void)
+{
+    /* Returns accumulated smooth delta and resets it */
+    int val = smooth_scroll_current / 256;
+    if (val != 0) {
+        smooth_scroll_current -= val * 256;
+        smooth_scroll_target -= val * 256;
+    }
+    return val;
 }

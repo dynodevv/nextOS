@@ -412,7 +412,7 @@ static void settings_mouse(window_t *win, int mx, int my, int buttons)
     }
 
     /* Handle scroll wheel for keyboard layout list */
-    int scroll = compositor_get_scroll();
+    int scroll = compositor_get_smooth_scroll();
     if (scroll != 0 && current_tab == TAB_KEYBOARD) {
         int max_scroll = KB_LAYOUT_COUNT - KB_VISIBLE_ROWS;
         if (max_scroll > 0) {

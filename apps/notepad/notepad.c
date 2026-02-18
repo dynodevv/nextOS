@@ -472,7 +472,7 @@ static void notepad_mouse(window_t *win, int mx, int my, int buttons)
     }
 
     /* Handle scroll wheel */
-    int scroll = compositor_get_scroll();
+    int scroll = compositor_get_smooth_scroll();
     if (scroll != 0) {
         int total_lines = 1;
         for (int i = 0; i < text_len; i++) {

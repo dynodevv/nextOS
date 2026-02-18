@@ -534,7 +534,7 @@ static void explorer_mouse(window_t *win, int mx, int my, int buttons)
     }
 
     /* Handle scroll wheel */
-    int scroll = compositor_get_scroll();
+    int scroll = compositor_get_smooth_scroll();
     if (scroll != 0 && !rename_dialog_active) {
         scroll_offset += scroll * 3;
         if (scroll_offset < 0) scroll_offset = 0;
