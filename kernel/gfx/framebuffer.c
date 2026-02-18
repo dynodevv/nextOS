@@ -45,8 +45,6 @@ static int bga_available(void)
     return (id >= 0xB0C0 && id <= 0xB0CF);
 }
 
-static framebuffer_t fb;
-
 /* ── Built-in 8x16 bitmap font (ASCII 32-126) ────────────────────────── */
 /* Minimal bitmapped font — each character is 8 pixels wide, 16 rows tall.
  * Stored as 16 bytes per glyph (one byte per row, MSB = leftmost pixel).
@@ -396,9 +394,12 @@ void fb_swap(void)
 {
     if (fb.backbuffer == fb.address) return;
 
-    /* Copy backbuffer to front buffer using 64-bit transfers */
+    static int back_page = 0;
+    uint32_t page_offset = back_page ? fb.width * fb.height : 0;
+
+    /* Copy backbuffer to the off-screen VRAM page using 64-bit transfers */
     uint64_t *src = (uint64_t *)fb.backbuffer;
-    uint64_t *dst = (uint64_t *)fb.address;
+    uint64_t *dst = (uint64_t *)(fb.address + page_offset);
     uint32_t total = fb.width * fb.height / 2;
 
     for (uint32_t i = 0; i < total; i++) {
@@ -406,15 +407,14 @@ void fb_swap(void)
     }
     if (fb.width * fb.height & 1) {
         uint32_t last = fb.width * fb.height - 1;
-        fb.address[last] = fb.backbuffer[last];
+        fb.address[page_offset + last] = fb.backbuffer[last];
     }
 
-    /* Use BGA Y-offset flip to present atomically (eliminates tearing) */
-    if (bga_available()) {
-        static int flip_page = 0;
-        flip_page ^= 1;
-        bga_write(VBE_DISPI_INDEX_Y_OFF, flip_page ? (uint16_t)fb.height : 0);
-    }
+    /* Flip display to the page we just wrote (eliminates tearing) */
+    if (bga_available())
+        bga_write(VBE_DISPI_INDEX_Y_OFF, back_page ? (uint16_t)fb.height : 0);
+
+    back_page ^= 1;
 }
 
 void fb_clear(uint32_t color)

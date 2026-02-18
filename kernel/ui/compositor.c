@@ -959,10 +959,10 @@ void desktop_draw_taskbar(void)
 
     /* Clock on the right side of the taskbar (CMOS RTC) */
     {
-        /* Read hours and minutes from CMOS RTC */
+        /* Read format register first, then hours and minutes */
+        outb(0x70, 0x0B); uint8_t regb = inb(0x71);
         outb(0x70, 0x04); uint8_t hour = inb(0x71);
         outb(0x70, 0x02); uint8_t min  = inb(0x71);
-        outb(0x70, 0x0B); uint8_t regb = inb(0x71);
 
         /* Convert BCD to binary if needed */
         if (!(regb & 0x04)) {
