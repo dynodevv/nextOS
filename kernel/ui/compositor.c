@@ -449,7 +449,7 @@ static void draw_window(window_t *win)
         int ch = win->height - BORDER_W * 2;
         int draw_cw = w - BORDER_W * 2;
         int draw_ch = h - BORDER_W * 2;
-        if (draw_cw > 0 && draw_ch > 0) {
+        if (draw_cw > 0 && draw_ch > 0 && cw > 0 && ch > 0) {
             for (int row = 0; row < draw_ch; row++) {
                 int src_row = row * ch / draw_ch;
                 if (src_row >= ch) src_row = ch - 1;
@@ -1520,6 +1520,11 @@ int compositor_get_smooth_scroll(void)
     int val = smooth_scroll_current / 256;
     if (val != 0) {
         smooth_scroll_current -= val * 256;
+        smooth_scroll_target -= val * 256;
+    } else if (smooth_scroll_current != 0) {
+        /* Snap small remainders to prevent stuck scroll */
+        val = (smooth_scroll_current > 0) ? 1 : -1;
+        smooth_scroll_current = 0;
         smooth_scroll_target -= val * 256;
     }
     return val;
