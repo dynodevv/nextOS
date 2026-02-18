@@ -20,9 +20,10 @@ static int      start_menu_open = 0;
 static void   (*start_menu_callback)(int item) = (void *)0;
 static int      current_scroll = 0;  /* Scroll delta for current frame */
 
-/* Smooth scroll state */
-static int      smooth_scroll_target = 0;
-static int      smooth_scroll_current = 0;  /* Fixed-point x256 */
+/* Smooth scroll state — pixel-level interpolated scrolling */
+static int      smooth_scroll_accum = 0;    /* Accumulated pixels to deliver */
+static int      smooth_scroll_output = 0;   /* Pixel delta for current frame */
+#define SMOOTH_SCROLL_PIXELS_PER_NOTCH 120  /* Total pixels per scroll notch */
 
 /* Wallpaper cache to avoid expensive per-frame redraws */
 static uint32_t *wallpaper_cache = (void *)0;
@@ -1083,6 +1084,23 @@ void compositor_destroy_window(window_t *win)
 
 void compositor_render_frame(void)
 {
+    /* Smooth scroll: release pixels gradually from accumulator */
+    if (smooth_scroll_accum > 0) {
+        int step = smooth_scroll_accum * 3 / 10;
+        if (step < 2) step = 2;
+        if (step > smooth_scroll_accum) step = smooth_scroll_accum;
+        smooth_scroll_output = step;
+        smooth_scroll_accum -= step;
+    } else if (smooth_scroll_accum < 0) {
+        int step = (-smooth_scroll_accum) * 3 / 10;
+        if (step < 2) step = 2;
+        if (step > -smooth_scroll_accum) step = -smooth_scroll_accum;
+        smooth_scroll_output = -step;
+        smooth_scroll_accum += step;
+    } else {
+        smooth_scroll_output = 0;
+    }
+
     /* Finalize completed animations */
     for (int i = 0; i < MAX_WINDOWS; i++) {
         if (!windows[i].active || windows[i].anim_type == ANIM_NONE) continue;
@@ -1195,22 +1213,9 @@ void compositor_handle_mouse(int mx, int my, int buttons, int scroll)
 {
     current_scroll = scroll;
 
-    /* Smooth scroll: accumulate target, interpolate each frame */
+    /* Smooth scroll: accumulate pixel-level target */
     if (scroll != 0)
-        smooth_scroll_target += scroll * 256;
-    /* Interpolate toward target (ease ~30% per frame at 120fps) */
-    if (smooth_scroll_current != smooth_scroll_target) {
-        int diff = smooth_scroll_target - smooth_scroll_current;
-        int step = diff * 3 / 10;
-        if (step == 0) step = (diff > 0) ? 1 : -1;
-        smooth_scroll_current += step;
-        /* Snap when close enough */
-        int remaining = smooth_scroll_target - smooth_scroll_current;
-        if (remaining < 0) remaining = -remaining;
-        if (remaining < 4) {
-            smooth_scroll_current = smooth_scroll_target;
-        }
-    }
+        smooth_scroll_accum += scroll * SMOOTH_SCROLL_PIXELS_PER_NOTCH;
 
     int click = (buttons & 1) && !(prev_mouse_buttons & 1);
     int right_click = (buttons & 2) && !(prev_mouse_buttons & 2);
@@ -1516,16 +1521,5 @@ int compositor_get_scroll(void)
 
 int compositor_get_smooth_scroll(void)
 {
-    /* Returns accumulated smooth delta and resets it */
-    int val = smooth_scroll_current / 256;
-    if (val != 0) {
-        smooth_scroll_current -= val * 256;
-        smooth_scroll_target -= val * 256;
-    } else if (smooth_scroll_current != 0) {
-        /* Snap small remainders to prevent stuck scroll */
-        val = (smooth_scroll_current > 0) ? 1 : -1;
-        smooth_scroll_current = 0;
-        smooth_scroll_target -= val * 256;
-    }
-    return val;
+    return smooth_scroll_output;
 }

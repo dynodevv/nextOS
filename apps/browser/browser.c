@@ -3145,7 +3145,7 @@ static void browser_mouse(window_t *win, int mx, int my, int buttons)
         int total_h = content_total_h > content_h ? content_total_h : content_h;
         int max_scroll = total_h - content_h;
         if (max_scroll < 0) max_scroll = 0;
-        scroll_y += scroll * 40;
+        scroll_y += scroll;
         if (scroll_y < 0) scroll_y = 0;
         if (scroll_y > max_scroll) scroll_y = max_scroll;
     }

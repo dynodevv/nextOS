@@ -482,7 +482,7 @@ static void notepad_mouse(window_t *win, int mx, int my, int buttons)
         if (visible_lines < 1) visible_lines = 1;
         int max_scroll = (total_lines - visible_lines) * LINE_HEIGHT;
         if (max_scroll < 0) max_scroll = 0;
-        scroll_y += scroll * LINE_HEIGHT * 3;
+        scroll_y += scroll;
         if (scroll_y < 0) scroll_y = 0;
         if (scroll_y > max_scroll) scroll_y = max_scroll;
     }
