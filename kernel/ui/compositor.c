@@ -827,6 +827,28 @@ static void draw_start_menu(void)
 
     int my = my_base + y_offset;
 
+    /* Save background behind menu for proper alpha blending */
+    framebuffer_t *fb_ptr = fb_get();
+    int fw = (int)fb_ptr->width, fh = (int)fb_ptr->height;
+    int sm_save_x0 = mx - 1, sm_save_y0 = my;
+    int sm_save_w = START_MENU_W + 6, sm_save_h = mh + 5;
+    if (sm_save_x0 < 0) sm_save_x0 = 0;
+    if (sm_save_y0 < 0) sm_save_y0 = 0;
+    if (sm_save_x0 + sm_save_w > fw) sm_save_w = fw - sm_save_x0;
+    if (sm_save_y0 + sm_save_h > fh) sm_save_h = fh - sm_save_y0;
+
+    uint32_t *sm_bg_save = (void *)0;
+    if (sm_alpha < 255 && sm_save_w > 0 && sm_save_h > 0) {
+        sm_bg_save = (uint32_t *)kmalloc(sm_save_w * sm_save_h * 4);
+        if (sm_bg_save) {
+            for (int r = 0; r < sm_save_h; r++) {
+                for (int c = 0; c < sm_save_w; c++) {
+                    sm_bg_save[r * sm_save_w + c] = fb_getpixel(sm_save_x0 + c, sm_save_y0 + r);
+                }
+            }
+        }
+    }
+
     /* Menu shadow */
     fb_fill_rect(mx + 4, my + 4, START_MENU_W, mh, 0x202020);
     /* Menu background */
@@ -859,19 +881,25 @@ static void draw_start_menu(void)
     }
 
     /* Fade overlay for animation — blend with saved background */
-    if (sm_alpha < 255) {
-        int fw = (int)f->width, fh = (int)f->height;
+    if (sm_alpha < 255 && sm_bg_save) {
         uint8_t inv = 255 - sm_alpha;
+        for (int r = 0; r < sm_save_h; r++) {
+            for (int c = 0; c < sm_save_w; c++) {
+                int px = sm_save_x0 + c, py = sm_save_y0 + r;
+                uint32_t bg_px = sm_bg_save[r * sm_save_w + c];
+                uint32_t win_px = fb_getpixel(px, py);
+                fb_putpixel(px, py, rgba_blend(win_px, bg_px, inv));
+            }
+        }
+        kfree(sm_bg_save);
+    } else if (sm_alpha < 255) {
+        /* Fallback */
         for (int row = 0; row < mh + 5; row++) {
             for (int col = -1; col < START_MENU_W + 5; col++) {
                 int px = mx + col, py = my + row;
                 if (px < 0 || py < 0 || px >= fw || py >= fh) continue;
                 uint32_t cur = fb_getpixel(px, py);
-                uint32_t bg = 0x000000;
-                if (wallpaper_cache && (uint32_t)px < wallpaper_w &&
-                    (uint32_t)py < wallpaper_h)
-                    bg = wallpaper_cache[py * wallpaper_w + px];
-                fb_putpixel(px, py, rgba_blend(cur, bg, inv));
+                fb_putpixel(px, py, rgba_blend(cur, 0x000000, 255 - sm_alpha));
             }
         }
     }
