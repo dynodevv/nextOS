@@ -33,6 +33,12 @@ static int       wallpaper_dirty = 1;
 static theme_t   wallpaper_theme = THEME_BRUSHED_METAL;
 static uint32_t  wallpaper_w = 0, wallpaper_h = 0;
 
+/* Clock state — cached to avoid CMOS I/O reads every frame */
+static int      clock_utc_offset = 0;  /* UTC offset in hours (-12..+14) */
+static uint8_t  cached_hour = 0;
+static uint8_t  cached_min  = 0;
+static uint64_t clock_last_read = 0;   /* Tick of last CMOS read */
+
 /* Forward declarations */
 static void resize_canvas(window_t *w, int new_w, int new_h);
 
@@ -959,25 +965,31 @@ void desktop_draw_taskbar(void)
 
     /* Clock on the right side of the taskbar (CMOS RTC) */
     {
-        /* Read format register first, then hours and minutes */
-        outb(0x70, 0x0B); uint8_t regb = inb(0x71);
-        outb(0x70, 0x04); uint8_t hour = inb(0x71);
-        outb(0x70, 0x02); uint8_t min  = inb(0x71);
-
-        /* Convert BCD to binary if needed */
-        if (!(regb & 0x04)) {
-            hour = (hour >> 4) * 10 + (hour & 0x0F);
-            min  = (min >> 4) * 10 + (min & 0x0F);
+        /* Re-read CMOS only once per second (1000 ticks at 1kHz) */
+        uint64_t now = timer_get_ticks();
+        if (now - clock_last_read >= 1000) {
+            clock_last_read = now;
+            outb(0x70, 0x0B); uint8_t regb = inb(0x71);
+            outb(0x70, 0x04); uint8_t hour = inb(0x71);
+            outb(0x70, 0x02); uint8_t min  = inb(0x71);
+            if (!(regb & 0x04)) {
+                hour = (hour >> 4) * 10 + (hour & 0x0F);
+                min  = (min >> 4) * 10 + (min & 0x0F);
+            }
+            /* Apply UTC offset */
+            int h = (int)hour + clock_utc_offset;
+            if (h < 0) h += 24;
+            if (h >= 24) h -= 24;
+            cached_hour = (uint8_t)h;
+            cached_min  = (min <= 59) ? min : 0;
         }
-        if (hour > 23) hour = 0;
-        if (min > 59) min = 0;
 
         char time_str[6];
-        time_str[0] = '0' + hour / 10;
-        time_str[1] = '0' + hour % 10;
+        time_str[0] = '0' + cached_hour / 10;
+        time_str[1] = '0' + cached_hour % 10;
         time_str[2] = ':';
-        time_str[3] = '0' + min / 10;
-        time_str[4] = '0' + min % 10;
+        time_str[3] = '0' + cached_min / 10;
+        time_str[4] = '0' + cached_min % 10;
         time_str[5] = '\0';
 
         int clock_w = 5 * 8 + 16;
@@ -1056,6 +1068,18 @@ void compositor_set_theme(theme_t theme)
 theme_t compositor_get_theme(void)
 {
     return current_theme;
+}
+
+void compositor_set_utc_offset(int hours)
+{
+    if (hours >= -12 && hours <= 14)
+        clock_utc_offset = hours;
+    clock_last_read = 0;  /* Force re-read on next frame */
+}
+
+int compositor_get_utc_offset(void)
+{
+    return clock_utc_offset;
 }
 
 int compositor_set_resolution(int w, int h)

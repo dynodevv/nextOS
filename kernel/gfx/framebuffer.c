@@ -26,6 +26,7 @@
 #define VBE_DISPI_LFB_ENABLED   0x40
 
 static framebuffer_t fb;
+static int bga_detected = 0;  /* Cached BGA availability (probed once at init) */
 
 static void bga_write(uint16_t reg, uint16_t val)
 {
@@ -39,10 +40,10 @@ static uint16_t bga_read(uint16_t reg)
     return inw(VBE_DISPI_IOPORT_DATA);
 }
 
-static int bga_available(void)
+static void bga_probe(void)
 {
     uint16_t id = bga_read(VBE_DISPI_INDEX_ID);
-    return (id >= 0xB0C0 && id <= 0xB0CF);
+    bga_detected = (id >= 0xB0C0 && id <= 0xB0CF);
 }
 
 /* ── Built-in 8x16 bitmap font (ASCII 32-126) ────────────────────────── */
@@ -345,6 +346,13 @@ void fb_init(uint64_t addr, uint32_t w, uint32_t h, uint32_t pitch, uint32_t bpp
     fb.pitch   = pitch;
     fb.bpp     = bpp;
 
+    /* Probe BGA once and configure virtual height for page flipping */
+    bga_probe();
+    if (bga_detected) {
+        bga_write(VBE_DISPI_INDEX_VIRT_H, (uint16_t)(h * 2));
+        bga_write(VBE_DISPI_INDEX_Y_OFF, 0);
+    }
+
     /* Allocate back buffer */
     fb.backbuffer = (uint32_t *)kmalloc(w * h * 4);
     if (!fb.backbuffer) {
@@ -354,7 +362,7 @@ void fb_init(uint64_t addr, uint32_t w, uint32_t h, uint32_t pitch, uint32_t bpp
 
 int fb_set_resolution(uint32_t w, uint32_t h)
 {
-    if (!bga_available()) return -1;
+    if (!bga_detected) return -1;
     if (w == fb.width && h == fb.height) return 0;
 
     /* Program BGA for new mode */
@@ -411,7 +419,7 @@ void fb_swap(void)
     }
 
     /* Flip display to the page we just wrote (eliminates tearing) */
-    if (bga_available())
+    if (bga_detected)
         bga_write(VBE_DISPI_INDEX_Y_OFF, back_page ? (uint16_t)fb.height : 0);
 
     back_page ^= 1;

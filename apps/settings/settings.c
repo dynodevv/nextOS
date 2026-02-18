@@ -26,7 +26,10 @@ typedef struct {
     uint32_t theme;
     uint32_t kb_layout;
     uint32_t mouse_speed;
-    uint8_t  reserved[512 - 16];
+    uint32_t resolution_w;
+    uint32_t resolution_h;
+    int32_t  utc_offset;      /* UTC offset in hours (-12..+14) */
+    uint8_t  reserved[512 - 28];
 } __attribute__((packed)) settings_disk_t;
 
 void settings_save_to_disk(void)
@@ -38,6 +41,10 @@ void settings_save_to_disk(void)
     cfg.theme = (uint32_t)compositor_get_theme();
     cfg.kb_layout = (uint32_t)keyboard_get_layout();
     cfg.mouse_speed = (uint32_t)mouse_get_speed();
+    framebuffer_t *f = fb_get();
+    cfg.resolution_w = f->width;
+    cfg.resolution_h = f->height;
+    cfg.utc_offset = (int32_t)compositor_get_utc_offset();
     disk_write(disk, SETTINGS_LBA, 1, &cfg);
 }
 
@@ -54,6 +61,11 @@ void settings_load_from_disk(void)
         keyboard_set_layout((kb_layout_t)cfg.kb_layout);
     if (cfg.mouse_speed >= 1 && cfg.mouse_speed <= 10)
         mouse_set_speed((int)cfg.mouse_speed);
+    if (cfg.resolution_w >= 640 && cfg.resolution_w <= 1920 &&
+        cfg.resolution_h >= 480 && cfg.resolution_h <= 1080)
+        compositor_set_resolution((int)cfg.resolution_w, (int)cfg.resolution_h);
+    if (cfg.utc_offset >= -12 && cfg.utc_offset <= 14)
+        compositor_set_utc_offset((int)cfg.utc_offset);
 }
 
 /* ── Tab identifiers ──────────────────────────────────────────────────── */
@@ -241,6 +253,32 @@ static void draw_display_tab(uint32_t *canvas, int cw, int ch)
         draw_canvas_string(canvas, cw, ch, 30, by + 6,
                            resolutions[i].label, fg, bg);
     }
+
+    /* UTC offset setting */
+    int tz_y = 80 + RES_COUNT * 36 + 10;
+    draw_canvas_string(canvas, cw, ch, 20, tz_y + 4, "UTC Offset:",
+                       COL_LABEL, COL_LEATHER);
+    /* Minus button */
+    draw_canvas_gradient(canvas, cw, ch, 150, tz_y, 30, 24,
+                         COL_BTN_TOP, COL_BTN_BOT);
+    draw_canvas_string(canvas, cw, ch, 160, tz_y + 4, "-", COL_BTN_TEXT, COL_BTN_TOP);
+    /* Current offset value */
+    {
+        int off = compositor_get_utc_offset();
+        char off_str[6];
+        int pos = 0;
+        if (off >= 0) { off_str[pos++] = '+'; }
+        else { off_str[pos++] = '-'; off = -off; }
+        if (off >= 10) off_str[pos++] = '0' + off / 10;
+        off_str[pos++] = '0' + off % 10;
+        off_str[pos] = '\0';
+        draw_canvas_string(canvas, cw, ch, 188, tz_y + 4, off_str,
+                           COL_LABEL, COL_LEATHER);
+    }
+    /* Plus button */
+    draw_canvas_gradient(canvas, cw, ch, 230, tz_y, 30, 24,
+                         COL_BTN_TOP, COL_BTN_BOT);
+    draw_canvas_string(canvas, cw, ch, 240, tz_y + 4, "+", COL_BTN_TEXT, COL_BTN_TOP);
 }
 
 /* ── Theme tab ────────────────────────────────────────────────────────── */
@@ -438,11 +476,33 @@ static void settings_mouse(window_t *win, int mx, int my, int buttons)
             int by = 80 + i * 36;
             if (mx >= 20 && mx < 220 && my >= by && my < by + 28) {
                 if (i != resolution_index) {
-                    if (compositor_set_resolution(resolutions[i].w, resolutions[i].h) == 0)
+                    if (compositor_set_resolution(resolutions[i].w, resolutions[i].h) == 0) {
                         resolution_index = i;
+                        settings_save_to_disk();
+                    }
                 }
                 return;
             }
+        }
+        /* UTC offset +/- buttons */
+        int tz_y = 80 + RES_COUNT * 36 + 10;
+        /* Minus button */
+        if (mx >= 150 && mx < 180 && my >= tz_y && my < tz_y + 24) {
+            int off = compositor_get_utc_offset();
+            if (off > -12) {
+                compositor_set_utc_offset(off - 1);
+                settings_save_to_disk();
+            }
+            return;
+        }
+        /* Plus button */
+        if (mx >= 230 && mx < 260 && my >= tz_y && my < tz_y + 24) {
+            int off = compositor_get_utc_offset();
+            if (off < 14) {
+                compositor_set_utc_offset(off + 1);
+                settings_save_to_disk();
+            }
+            return;
         }
     }
 
