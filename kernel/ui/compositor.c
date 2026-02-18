@@ -135,6 +135,45 @@ static void draw_gradient_rect(int x, int y, int w, int h,
     }
 }
 
+/* ── Animation helpers ─────────────────────────────────────────────────── */
+#define ANIM_OPEN_MS     200
+#define ANIM_CLOSE_MS    150
+#define ANIM_MIN_MS      250
+#define ANIM_MAX_MS      200
+#define START_MENU_ANIM_MS 150
+
+static int      start_menu_anim = 0;
+static uint64_t start_menu_anim_start = 0;
+
+/* Ease-out cubic: 1 - (1-t)^3, returns 0..1000 */
+static int ease_out_cubic(uint64_t elapsed_ms, int duration_ms)
+{
+    if ((int)elapsed_ms >= duration_ms) return 1000;
+    if (elapsed_ms == 0) return 0;
+    int t = (int)(elapsed_ms * 1000 / (uint64_t)duration_ms);
+    int inv = 1000 - t;
+    int64_t inv3 = (int64_t)inv * inv * inv;
+    return (int)(1000 - inv3 / 1000000);
+}
+
+static int anim_lerp(int from, int to, int p1000)
+{
+    return from + (to - from) * p1000 / 1000;
+}
+
+static int get_anim_duration(int anim_type)
+{
+    switch (anim_type) {
+    case ANIM_OPEN:        return ANIM_OPEN_MS;
+    case ANIM_CLOSE:       return ANIM_CLOSE_MS;
+    case ANIM_MINIMIZE:    return ANIM_MIN_MS;
+    case ANIM_UNMINIMIZE:  return ANIM_MIN_MS;
+    case ANIM_MAXIMIZE:    return ANIM_MAX_MS;
+    case ANIM_RESTORE:     return ANIM_MAX_MS;
+    default:               return 200;
+    }
+}
+
 /* ── Rounded rectangle helper ─────────────────────────────────────────── */
 /* Returns 1 if (col,row) is inside a rounded rect of size w x h with radius r */
 static int inside_rounded_rect(int col, int row, int w, int h, int r)
@@ -273,10 +312,45 @@ static void draw_titlebar_circle(int cx, int cy, int r, uint32_t color)
 
 static void draw_window(window_t *win)
 {
-    if (win->minimized) return;
+    if (win->minimized && win->anim_type != ANIM_UNMINIMIZE &&
+        win->anim_type != ANIM_MINIMIZE) return;
 
     const theme_colors_t *tc = &themes[current_theme];
     int x = win->x, y = win->y, w = win->width, h = win->height;
+    uint8_t anim_alpha = 255;
+
+    if (win->anim_type != ANIM_NONE) {
+        uint64_t elapsed = timer_get_ticks() - win->anim_start;
+        int duration = get_anim_duration(win->anim_type);
+        int p = ease_out_cubic(elapsed, duration);
+        switch (win->anim_type) {
+        case ANIM_OPEN:
+            y = win->y + 15 - 15 * p / 1000;
+            anim_alpha = (uint8_t)(p * 255 / 1000);
+            break;
+        case ANIM_CLOSE:
+            y = win->y + 10 * p / 1000;
+            anim_alpha = (uint8_t)(255 - p * 255 / 1000);
+            if ((int)elapsed >= duration) return;
+            break;
+        case ANIM_MINIMIZE:
+            x = anim_lerp(win->anim_from_x, win->anim_to_x, p);
+            y = anim_lerp(win->anim_from_y, win->anim_to_y, p);
+            anim_alpha = (uint8_t)(255 - p * 255 / 1000);
+            if ((int)elapsed >= duration) return;
+            break;
+        case ANIM_UNMINIMIZE:
+            x = anim_lerp(win->anim_from_x, win->anim_to_x, p);
+            y = anim_lerp(win->anim_from_y, win->anim_to_y, p);
+            anim_alpha = (uint8_t)(p * 255 / 1000);
+            break;
+        case ANIM_MAXIMIZE:
+        case ANIM_RESTORE:
+            anim_alpha = (uint8_t)(p * 255 / 1000);
+            break;
+        }
+    }
+
     int total_h = h + TITLEBAR_H;
 
     /* Drop shadow */
@@ -336,12 +410,31 @@ static void draw_window(window_t *win)
     }
 
     /* Unfocused window dimming overlay (entire window) */
-    if (!win->focused) {
+    if (!win->focused && win->anim_type != ANIM_CLOSE) {
         for (int row = 0; row < total_h; row++) {
             for (int col = 0; col < w; col++) {
                 int px = x + col, py = y + row;
                 uint32_t orig = fb_getpixel(px, py);
                 fb_putpixel(px, py, rgba_blend(orig, 0x000000, 60));
+            }
+        }
+    }
+
+    /* Animation fade overlay — blends drawn window back towards wallpaper */
+    if (anim_alpha < 255) {
+        framebuffer_t *fb = fb_get();
+        int fw = (int)fb->width, fh = (int)fb->height;
+        uint8_t inv = 255 - anim_alpha;
+        for (int row = -1; row < total_h + 5; row++) {
+            for (int col = -1; col < w + 5; col++) {
+                int px = x + col, py = y + row;
+                if (px < 0 || py < 0 || px >= fw || py >= fh) continue;
+                uint32_t wp = 0x000000;
+                if (wallpaper_cache && (uint32_t)px < wallpaper_w &&
+                    (uint32_t)py < wallpaper_h)
+                    wp = wallpaper_cache[py * wallpaper_w + px];
+                uint32_t cur = fb_getpixel(px, py);
+                fb_putpixel(px, py, rgba_blend(cur, wp, inv));
             }
         }
     }
@@ -648,7 +741,32 @@ static void draw_start_menu(void)
     int separator_h = 6;
     int mh = START_MENU_ITEMS * START_MENU_ITEM_H + 8 + separator_h;
     int mx = 4;
-    int my = (int)f->height - TASKBAR_H - mh;
+    int my_base = (int)f->height - TASKBAR_H - mh;
+
+    /* Animation offset and alpha */
+    int y_offset = 0;
+    uint8_t sm_alpha = 255;
+
+    if (start_menu_anim == 1) {
+        uint64_t elapsed = timer_get_ticks() - start_menu_anim_start;
+        int p = ease_out_cubic(elapsed, START_MENU_ANIM_MS);
+        y_offset = 20 - 20 * p / 1000;
+        sm_alpha = (uint8_t)(p * 255 / 1000);
+        if ((int)elapsed >= START_MENU_ANIM_MS)
+            start_menu_anim = 0;
+    } else if (start_menu_anim == 2) {
+        uint64_t elapsed = timer_get_ticks() - start_menu_anim_start;
+        int p = ease_out_cubic(elapsed, START_MENU_ANIM_MS);
+        y_offset = 20 * p / 1000;
+        sm_alpha = (uint8_t)(255 - p * 255 / 1000);
+        if ((int)elapsed >= START_MENU_ANIM_MS) {
+            start_menu_open = 0;
+            start_menu_anim = 0;
+            return;
+        }
+    }
+
+    int my = my_base + y_offset;
 
     /* Menu shadow */
     fb_fill_rect(mx + 4, my + 4, START_MENU_W, mh, 0x202020);
@@ -677,6 +795,24 @@ static void draw_start_menu(void)
                 if (row == separator_h / 2)
                     fb_putpixel(sx, sep_y + row,
                                 rgba_blend(fb_getpixel(sx, sep_y + row), 0x000000, 60));
+            }
+        }
+    }
+
+    /* Fade overlay for animation */
+    if (sm_alpha < 255) {
+        int fw = (int)f->width, fh = (int)f->height;
+        uint8_t inv = 255 - sm_alpha;
+        for (int row = 0; row < mh + 5; row++) {
+            for (int col = -1; col < START_MENU_W + 5; col++) {
+                int px = mx + col, py = my + row;
+                if (px < 0 || py < 0 || px >= fw || py >= fh) continue;
+                uint32_t wp = 0x000000;
+                if (wallpaper_cache && (uint32_t)px < wallpaper_w &&
+                    (uint32_t)py < wallpaper_h)
+                    wp = wallpaper_cache[py * wallpaper_w + px];
+                uint32_t cur = fb_getpixel(px, py);
+                fb_putpixel(px, py, rgba_blend(cur, wp, inv));
             }
         }
     }
@@ -816,6 +952,8 @@ window_t *compositor_create_window(const char *title, int x, int y, int w, int h
             windows[i].orig_w = w;
             windows[i].orig_h = h;
             windows[i].close_hover = 0;
+            windows[i].anim_type = ANIM_OPEN;
+            windows[i].anim_start = timer_get_ticks();
             windows[i].on_paint = (void *)0;
             windows[i].on_key   = (void *)0;
             windows[i].on_mouse = (void *)0;
@@ -844,15 +982,50 @@ window_t *compositor_create_window(const char *title, int x, int y, int w, int h
 
 void compositor_destroy_window(window_t *win)
 {
-    if (!win) return;
+    if (!win || !win->active) return;
+    if (win->anim_type == ANIM_CLOSE) return;
     if (win->on_close) win->on_close(win);
-    if (win->canvas) kfree(win->canvas);
-    win->active = 0;
-    window_count--;
+    win->on_paint = (void *)0;
+    win->on_key   = (void *)0;
+    win->on_mouse = (void *)0;
+    win->on_close = (void *)0;
+    win->focused  = 0;
+    win->anim_type  = ANIM_CLOSE;
+    win->anim_start = timer_get_ticks();
 }
 
 void compositor_render_frame(void)
 {
+    /* Finalize completed animations */
+    for (int i = 0; i < MAX_WINDOWS; i++) {
+        if (!windows[i].active || windows[i].anim_type == ANIM_NONE) continue;
+        uint64_t elapsed = timer_get_ticks() - windows[i].anim_start;
+        int duration = get_anim_duration(windows[i].anim_type);
+        if ((int)elapsed < duration) continue;
+        switch (windows[i].anim_type) {
+        case ANIM_OPEN:
+            windows[i].anim_type = ANIM_NONE;
+            break;
+        case ANIM_CLOSE:
+            if (windows[i].canvas) kfree(windows[i].canvas);
+            windows[i].canvas = (void *)0;
+            windows[i].active = 0;
+            window_count--;
+            break;
+        case ANIM_MINIMIZE:
+            windows[i].minimized = 1;
+            windows[i].anim_type = ANIM_NONE;
+            break;
+        case ANIM_UNMINIMIZE:
+            windows[i].anim_type = ANIM_NONE;
+            break;
+        case ANIM_MAXIMIZE:
+        case ANIM_RESTORE:
+            windows[i].anim_type = ANIM_NONE;
+            break;
+        }
+    }
+
     /* Draw desktop */
     desktop_draw_wallpaper();
 
@@ -888,6 +1061,7 @@ static window_t *window_at(int mx, int my)
     for (int i = 0; i < MAX_WINDOWS; i++) {
         window_t *w = &windows[i];
         if (!w->active || w->minimized || !w->focused) continue;
+        if (w->anim_type == ANIM_CLOSE || w->anim_type == ANIM_MINIMIZE) continue;
         if (mx >= w->x && mx < w->x + w->width &&
             my >= w->y && my < w->y + TITLEBAR_H + w->height)
             return w;
@@ -896,11 +1070,23 @@ static window_t *window_at(int mx, int my)
     for (int i = MAX_WINDOWS - 1; i >= 0; i--) {
         window_t *w = &windows[i];
         if (!w->active || w->minimized || w->focused) continue;
+        if (w->anim_type == ANIM_CLOSE || w->anim_type == ANIM_MINIMIZE) continue;
         if (mx >= w->x && mx < w->x + w->width &&
             my >= w->y && my < w->y + TITLEBAR_H + w->height)
             return w;
     }
     return (void *)0;
+}
+
+/* ── Helper: compute taskbar button X position for a window ───────────── */
+static int taskbar_button_x_for(window_t *target)
+{
+    int bx = 110;
+    for (int i = 0; i < MAX_WINDOWS; i++) {
+        if (&windows[i] == target) return bx;
+        if (windows[i].active) bx += 128;
+    }
+    return bx;
 }
 
 /* ── Helper: reallocate canvas after resize ───────────────────────────── */
@@ -946,7 +1132,16 @@ void compositor_handle_mouse(int mx, int my, int buttons, int scroll)
         /* Start menu button hit test (wider now: 90px) */
         int tb_y = (int)f->height - TASKBAR_H;
         if (mx >= 4 && mx < 94 && my >= tb_y + 4 && my < tb_y + TASKBAR_H - 4) {
-            start_menu_open = !start_menu_open;
+            if (start_menu_anim != 1 && start_menu_anim != 2) {
+                if (start_menu_open) {
+                    start_menu_anim = 2;
+                    start_menu_anim_start = timer_get_ticks();
+                } else {
+                    start_menu_open = 1;
+                    start_menu_anim = 1;
+                    start_menu_anim_start = timer_get_ticks();
+                }
+            }
             compositor_draw_cursor(mx, my);
             return;
         }
@@ -959,6 +1154,12 @@ void compositor_handle_mouse(int mx, int my, int buttons, int scroll)
                 if (mx >= bx && mx < bx + 120) {
                     if (windows[i].minimized) {
                         windows[i].minimized = 0;
+                        windows[i].anim_type = ANIM_UNMINIMIZE;
+                        windows[i].anim_start = timer_get_ticks();
+                        windows[i].anim_from_x = bx;
+                        windows[i].anim_from_y = (int)f->height - TASKBAR_H;
+                        windows[i].anim_to_x = windows[i].x;
+                        windows[i].anim_to_y = windows[i].y;
                     }
                     for (int j = 0; j < MAX_WINDOWS; j++)
                         windows[j].focused = 0;
@@ -971,7 +1172,7 @@ void compositor_handle_mouse(int mx, int my, int buttons, int scroll)
         }
 
         /* Start menu item hit test */
-        if (start_menu_open) {
+        if (start_menu_open && start_menu_anim != 2) {
             int separator_h = 6;
             int mh = START_MENU_ITEMS * START_MENU_ITEM_H + 8 + separator_h;
             int menu_x = 4;
@@ -988,14 +1189,16 @@ void compositor_handle_mouse(int mx, int my, int buttons, int scroll)
                     item = 4 + (rel_y - 4 * START_MENU_ITEM_H - separator_h) / START_MENU_ITEM_H;
                 }
                 if (item >= 0 && item < START_MENU_ITEMS) {
-                    start_menu_open = 0;
+                    start_menu_anim = 2;
+                    start_menu_anim_start = timer_get_ticks();
                     if (start_menu_callback)
                         start_menu_callback(item);
                 }
                 compositor_draw_cursor(mx, my);
                 return;
             }
-            start_menu_open = 0;
+            start_menu_anim = 2;
+            start_menu_anim_start = timer_get_ticks();
         }
 
         /* Window hit-test: use z-order-aware helper (before desktop icons
@@ -1021,6 +1224,8 @@ void compositor_handle_mouse(int mx, int my, int buttons, int scroll)
                     w->y = w->orig_y;
                     resize_canvas(w, w->orig_w, w->orig_h);
                     w->maximized = 0;
+                    w->anim_type = ANIM_RESTORE;
+                    w->anim_start = timer_get_ticks();
                 } else {
                     /* Maximize */
                     w->orig_x = w->x;
@@ -1031,6 +1236,8 @@ void compositor_handle_mouse(int mx, int my, int buttons, int scroll)
                     w->y = 0;
                     resize_canvas(w, (int)f->width, (int)f->height - TASKBAR_H - TITLEBAR_H);
                     w->maximized = 1;
+                    w->anim_type = ANIM_MAXIMIZE;
+                    w->anim_start = timer_get_ticks();
                 }
                 for (int j = 0; j < MAX_WINDOWS; j++)
                     windows[j].focused = 0;
@@ -1042,8 +1249,13 @@ void compositor_handle_mouse(int mx, int my, int buttons, int scroll)
             /* Minimize button (leftmost of the three) */
             int min_cx = w->x + w->width - 56;
             if ((mx - min_cx) * (mx - min_cx) + (my - btn_y_center) * (my - btn_y_center) <= 49) {
-                w->minimized = 1;
                 w->focused = 0;
+                w->anim_type = ANIM_MINIMIZE;
+                w->anim_start = timer_get_ticks();
+                w->anim_from_x = w->x;
+                w->anim_from_y = w->y;
+                w->anim_to_x = taskbar_button_x_for(w);
+                w->anim_to_y = (int)f->height - TASKBAR_H;
                 compositor_draw_cursor(mx, my);
                 return;
             }
@@ -1153,7 +1365,15 @@ void compositor_handle_key(char ascii, int scancode, int pressed)
 
 void compositor_toggle_start_menu(void)
 {
-    start_menu_open = !start_menu_open;
+    if (start_menu_anim == 1 || start_menu_anim == 2) return;
+    if (start_menu_open) {
+        start_menu_anim = 2;
+        start_menu_anim_start = timer_get_ticks();
+    } else {
+        start_menu_open = 1;
+        start_menu_anim = 1;
+        start_menu_anim_start = timer_get_ticks();
+    }
 }
 
 int compositor_get_scroll(void)

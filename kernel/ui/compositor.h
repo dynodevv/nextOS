@@ -16,6 +16,15 @@ typedef enum {
     THEME_COUNT
 } theme_t;
 
+/* ── Animation types ──────────────────────────────────────────────────── */
+#define ANIM_NONE        0
+#define ANIM_OPEN        1
+#define ANIM_CLOSE       2
+#define ANIM_MINIMIZE    3
+#define ANIM_UNMINIMIZE  4
+#define ANIM_MAXIMIZE    5
+#define ANIM_RESTORE     6
+
 /* ── Window structure ─────────────────────────────────────────────────── */
 #define MAX_WINDOWS 16
 #define WIN_TITLE_LEN 64
@@ -34,6 +43,12 @@ struct window_s {
     int      maximized;
     int      orig_x, orig_y, orig_w, orig_h;  /* Pre-maximize geometry */
     int      close_hover;
+
+    /* Animation state */
+    int      anim_type;
+    uint64_t anim_start;
+    int      anim_from_x, anim_from_y;
+    int      anim_to_x, anim_to_y;
 
     /* Callback: called each frame so the app can draw into canvas */
     void (*on_paint)(window_t *self);
