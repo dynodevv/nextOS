@@ -1,6 +1,6 @@
 /*
  * nextOS - framebuffer.h
- * Double-buffered VESA/GOP framebuffer engine
+ * Double-buffered VESA/GOP framebuffer engine with BGA mode switching
  */
 #ifndef NEXTOS_FRAMEBUFFER_H
 #define NEXTOS_FRAMEBUFFER_H
@@ -17,6 +17,7 @@ typedef struct {
 } framebuffer_t;
 
 void      fb_init(uint64_t addr, uint32_t w, uint32_t h, uint32_t pitch, uint32_t bpp);
+int       fb_set_resolution(uint32_t w, uint32_t h);
 void      fb_swap(void);
 void      fb_clear(uint32_t color);
 void      fb_putpixel(int x, int y, uint32_t color);

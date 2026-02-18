@@ -550,7 +550,7 @@ static void about_paint(window_t *win)
 
     /* Version & info lines */
     const char *lines[] = {
-        "Version 2.5.0",
+        "Version 3.0.0",
         "",
         "A next-generation",
         "operating system.",
@@ -719,9 +719,12 @@ void kernel_main(uint64_t mb_info_addr)
             draw_installer();
             handle_installer_input();
         } else {
-            /* Desktop compositor frame */
-            compositor_render_frame();
+            /* Process input first so positions are up-to-date before rendering */
             compositor_handle_mouse(ms.x, ms.y, ms.buttons, scroll);
+            /* Render all windows, wallpaper, taskbar to backbuffer */
+            compositor_render_frame();
+            /* Draw cursor on top of the rendered frame */
+            compositor_draw_cursor(ms.x, ms.y);
             fb_swap();
         }
 

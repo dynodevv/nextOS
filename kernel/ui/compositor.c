@@ -10,6 +10,8 @@
 #include "../gfx/framebuffer.h"
 #include "../mem/heap.h"
 #include "../drivers/timer.h"
+#include "../drivers/mouse.h"
+#include "../arch/x86_64/idt.h"
 
 /* ── Internal state ───────────────────────────────────────────────────── */
 static window_t windows[MAX_WINDOWS];
@@ -30,6 +32,9 @@ static uint32_t *wallpaper_cache = (void *)0;
 static int       wallpaper_dirty = 1;
 static theme_t   wallpaper_theme = THEME_BRUSHED_METAL;
 static uint32_t  wallpaper_w = 0, wallpaper_h = 0;
+
+/* Forward declarations */
+static void resize_canvas(window_t *w, int new_w, int new_h);
 
 /* ── Theme colour palettes ────────────────────────────────────────────── */
 typedef struct {
@@ -951,6 +956,37 @@ void desktop_draw_taskbar(void)
         fb_draw_string(bx + 8, y + 12, windows[i].title, tc->taskbar_text, 0x00000000);
         bx += 128;
     }
+
+    /* Clock on the right side of the taskbar (CMOS RTC) */
+    {
+        /* Read hours and minutes from CMOS RTC */
+        outb(0x70, 0x04); uint8_t hour = inb(0x71);
+        outb(0x70, 0x02); uint8_t min  = inb(0x71);
+        outb(0x70, 0x0B); uint8_t regb = inb(0x71);
+
+        /* Convert BCD to binary if needed */
+        if (!(regb & 0x04)) {
+            hour = (hour >> 4) * 10 + (hour & 0x0F);
+            min  = (min >> 4) * 10 + (min & 0x0F);
+        }
+        if (hour > 23) hour = 0;
+        if (min > 59) min = 0;
+
+        char time_str[6];
+        time_str[0] = '0' + hour / 10;
+        time_str[1] = '0' + hour % 10;
+        time_str[2] = ':';
+        time_str[3] = '0' + min / 10;
+        time_str[4] = '0' + min % 10;
+        time_str[5] = '\0';
+
+        int clock_w = 5 * 8 + 16;
+        int clock_x = (int)f->width - clock_w - 8;
+        draw_gradient_rect(clock_x, y + 4, clock_w, TASKBAR_H - 8,
+                           tc->button_top, tc->button_bot);
+        draw_bevel(clock_x, y + 4, clock_w, TASKBAR_H - 8, 0);
+        fb_draw_string(clock_x + 8, y + 12, time_str, tc->taskbar_text, 0x00000000);
+    }
 }
 
 /* ── Mouse cursor (skeuomorphic arrow with shadow) ────────────────────── */
@@ -1020,6 +1056,37 @@ void compositor_set_theme(theme_t theme)
 theme_t compositor_get_theme(void)
 {
     return current_theme;
+}
+
+int compositor_set_resolution(int w, int h)
+{
+    if (fb_set_resolution((uint32_t)w, (uint32_t)h) != 0)
+        return -1;
+
+    /* Update mouse bounds to new resolution */
+    mouse_set_bounds(w, h);
+
+    /* Invalidate wallpaper cache so it redraws at new size */
+    wallpaper_dirty = 1;
+
+    /* Clamp and adjust all active windows to fit new screen */
+    for (int i = 0; i < MAX_WINDOWS; i++) {
+        if (!windows[i].active) continue;
+        if (windows[i].maximized) {
+            windows[i].x = 0;
+            windows[i].y = 0;
+            resize_canvas(&windows[i], w, h - TASKBAR_H - TITLEBAR_H);
+        } else {
+            if (windows[i].x + windows[i].width > w)
+                windows[i].x = w - windows[i].width;
+            if (windows[i].x < 0) windows[i].x = 0;
+            if (windows[i].y + windows[i].height + TITLEBAR_H > h - TASKBAR_H)
+                windows[i].y = h - TASKBAR_H - windows[i].height - TITLEBAR_H;
+            if (windows[i].y < 0) windows[i].y = 0;
+        }
+    }
+
+    return 0;
 }
 
 window_t *compositor_create_window(const char *title, int x, int y, int w, int h)
@@ -1232,7 +1299,6 @@ void compositor_handle_mouse(int mx, int my, int buttons, int scroll)
             w->x = mx - w->drag_ox;
             w->y = my - w->drag_oy;
             if (release) w->dragging = 0;
-            compositor_draw_cursor(mx, my);
             return;
         }
     }
@@ -1253,7 +1319,6 @@ void compositor_handle_mouse(int mx, int my, int buttons, int scroll)
                     start_menu_anim_start = timer_get_ticks();
                 }
             }
-            compositor_draw_cursor(mx, my);
             return;
         }
 
@@ -1278,7 +1343,6 @@ void compositor_handle_mouse(int mx, int my, int buttons, int scroll)
                     for (int j = 0; j < MAX_WINDOWS; j++)
                         windows[j].focused = 0;
                     windows[i].focused = 1;
-                    compositor_draw_cursor(mx, my);
                     return;
                 }
                 bx += 128;
@@ -1308,7 +1372,6 @@ void compositor_handle_mouse(int mx, int my, int buttons, int scroll)
                     if (start_menu_callback)
                         start_menu_callback(item);
                 }
-                compositor_draw_cursor(mx, my);
                 return;
             }
             start_menu_anim = 2;
@@ -1325,7 +1388,6 @@ void compositor_handle_mouse(int mx, int my, int buttons, int scroll)
             int close_cx = w->x + w->width - 16;
             if ((mx - close_cx) * (mx - close_cx) + (my - btn_y_center) * (my - btn_y_center) <= 49) {
                 compositor_destroy_window(w);
-                compositor_draw_cursor(mx, my);
                 return;
             }
 
@@ -1376,7 +1438,6 @@ void compositor_handle_mouse(int mx, int my, int buttons, int scroll)
                 for (int j = 0; j < MAX_WINDOWS; j++)
                     windows[j].focused = 0;
                 w->focused = 1;
-                compositor_draw_cursor(mx, my);
                 return;
             }
 
@@ -1394,7 +1455,6 @@ void compositor_handle_mouse(int mx, int my, int buttons, int scroll)
                 w->anim_to_y = (int)f->height - TASKBAR_H;
                 w->anim_to_w = 120;
                 w->anim_to_h = 4;
-                compositor_draw_cursor(mx, my);
                 return;
             }
 
@@ -1408,7 +1468,6 @@ void compositor_handle_mouse(int mx, int my, int buttons, int scroll)
                 for (int j = 0; j < MAX_WINDOWS; j++)
                     windows[j].focused = 0;
                 w->focused = 1;
-                compositor_draw_cursor(mx, my);
                 return;
             }
 
@@ -1423,7 +1482,6 @@ void compositor_handle_mouse(int mx, int my, int buttons, int scroll)
                     int ly = my - w->y - TITLEBAR_H - BORDER_W;
                     w->on_mouse(w, lx, ly, buttons);
                 }
-                compositor_draw_cursor(mx, my);
                 return;
             }
         }
@@ -1447,7 +1505,6 @@ void compositor_handle_mouse(int mx, int my, int buttons, int scroll)
                     last_icon_click_tick = now;
                     last_icon_click_idx = i;
                 }
-                compositor_draw_cursor(mx, my);
                 return;
             }
         }
@@ -1467,7 +1524,6 @@ void compositor_handle_mouse(int mx, int my, int buttons, int scroll)
             int lx = mx - w->x - BORDER_W;
             int ly = my - w->y - TITLEBAR_H - BORDER_W;
             w->on_mouse(w, lx, ly, buttons);
-            compositor_draw_cursor(mx, my);
             return;
         }
     }
@@ -1480,9 +1536,6 @@ void compositor_handle_mouse(int mx, int my, int buttons, int scroll)
             windows[i].on_mouse(&windows[i], lx, ly, buttons);
         }
     }
-
-    /* Draw cursor last */
-    compositor_draw_cursor(mx, my);
 }
 
 void compositor_set_app_launcher(void (*callback)(int item))

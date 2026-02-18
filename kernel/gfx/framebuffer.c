@@ -1,9 +1,49 @@
 /*
  * nextOS - framebuffer.c
- * Double-buffered framebuffer with drawing primitives
+ * Double-buffered framebuffer with drawing primitives and BGA mode switching
  */
 #include "framebuffer.h"
 #include "../mem/heap.h"
+#include "../arch/x86_64/idt.h"
+
+/* ── Bochs Graphics Adapter (BGA) registers for runtime mode switching ── */
+#define VBE_DISPI_IOPORT_INDEX  0x01CE
+#define VBE_DISPI_IOPORT_DATA   0x01CF
+
+#define VBE_DISPI_INDEX_ID      0x00
+#define VBE_DISPI_INDEX_XRES    0x01
+#define VBE_DISPI_INDEX_YRES    0x02
+#define VBE_DISPI_INDEX_BPP     0x03
+#define VBE_DISPI_INDEX_ENABLE  0x04
+#define VBE_DISPI_INDEX_BANK    0x05
+#define VBE_DISPI_INDEX_VIRT_W  0x06
+#define VBE_DISPI_INDEX_VIRT_H  0x07
+#define VBE_DISPI_INDEX_X_OFF   0x08
+#define VBE_DISPI_INDEX_Y_OFF   0x09
+
+#define VBE_DISPI_DISABLED      0x00
+#define VBE_DISPI_ENABLED       0x01
+#define VBE_DISPI_LFB_ENABLED   0x40
+
+static framebuffer_t fb;
+
+static void bga_write(uint16_t reg, uint16_t val)
+{
+    outw(VBE_DISPI_IOPORT_INDEX, reg);
+    outw(VBE_DISPI_IOPORT_DATA, val);
+}
+
+static uint16_t bga_read(uint16_t reg)
+{
+    outw(VBE_DISPI_IOPORT_INDEX, reg);
+    return inw(VBE_DISPI_IOPORT_DATA);
+}
+
+static int bga_available(void)
+{
+    uint16_t id = bga_read(VBE_DISPI_INDEX_ID);
+    return (id >= 0xB0C0 && id <= 0xB0CF);
+}
 
 static framebuffer_t fb;
 
@@ -314,22 +354,66 @@ void fb_init(uint64_t addr, uint32_t w, uint32_t h, uint32_t pitch, uint32_t bpp
     }
 }
 
+int fb_set_resolution(uint32_t w, uint32_t h)
+{
+    if (!bga_available()) return -1;
+    if (w == fb.width && h == fb.height) return 0;
+
+    /* Program BGA for new mode */
+    bga_write(VBE_DISPI_INDEX_ENABLE, VBE_DISPI_DISABLED);
+    bga_write(VBE_DISPI_INDEX_XRES, (uint16_t)w);
+    bga_write(VBE_DISPI_INDEX_YRES, (uint16_t)h);
+    bga_write(VBE_DISPI_INDEX_BPP, 32);
+    bga_write(VBE_DISPI_INDEX_VIRT_W, (uint16_t)w);
+    bga_write(VBE_DISPI_INDEX_VIRT_H, (uint16_t)(h * 2));
+    bga_write(VBE_DISPI_INDEX_X_OFF, 0);
+    bga_write(VBE_DISPI_INDEX_Y_OFF, 0);
+    bga_write(VBE_DISPI_INDEX_ENABLE, VBE_DISPI_ENABLED | VBE_DISPI_LFB_ENABLED);
+
+    /* Verify mode was accepted */
+    uint16_t actual_w = bga_read(VBE_DISPI_INDEX_XRES);
+    uint16_t actual_h = bga_read(VBE_DISPI_INDEX_YRES);
+    if (actual_w != (uint16_t)w || actual_h != (uint16_t)h) return -1;
+
+    /* Free old backbuffer if it was heap-allocated */
+    if (fb.backbuffer && fb.backbuffer != fb.address)
+        kfree(fb.backbuffer);
+
+    fb.width  = w;
+    fb.height = h;
+    fb.pitch  = w * 4;
+    fb.bpp    = 32;
+
+    /* Allocate new backbuffer */
+    fb.backbuffer = (uint32_t *)kmalloc(w * h * 4);
+    if (!fb.backbuffer)
+        fb.backbuffer = fb.address;
+
+    return 0;
+}
+
 void fb_swap(void)
 {
     if (fb.backbuffer == fb.address) return;
 
-    /* Fast 64-bit copy for better throughput */
+    /* Copy backbuffer to front buffer using 64-bit transfers */
     uint64_t *src = (uint64_t *)fb.backbuffer;
     uint64_t *dst = (uint64_t *)fb.address;
-    uint32_t total = fb.width * fb.height / 2;  /* two 32-bit pixels per 64-bit word */
+    uint32_t total = fb.width * fb.height / 2;
 
     for (uint32_t i = 0; i < total; i++) {
         dst[i] = src[i];
     }
-    /* Handle odd pixel if width*height is odd */
     if (fb.width * fb.height & 1) {
         uint32_t last = fb.width * fb.height - 1;
         fb.address[last] = fb.backbuffer[last];
+    }
+
+    /* Use BGA Y-offset flip to present atomically (eliminates tearing) */
+    if (bga_available()) {
+        static int flip_page = 0;
+        flip_page ^= 1;
+        bga_write(VBE_DISPI_INDEX_Y_OFF, flip_page ? (uint16_t)fb.height : 0);
     }
 }
 

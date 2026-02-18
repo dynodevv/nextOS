@@ -437,9 +437,10 @@ static void settings_mouse(window_t *win, int mx, int my, int buttons)
         for (int i = 0; i < RES_COUNT; i++) {
             int by = 80 + i * 36;
             if (mx >= 20 && mx < 220 && my >= by && my < by + 28) {
-                resolution_index = i;
-                /* TODO: Actually change framebuffer mode via BIOS int 10h
-                 * or GOP protocol in a full UEFI implementation */
+                if (i != resolution_index) {
+                    if (compositor_set_resolution(resolutions[i].w, resolutions[i].h) == 0)
+                        resolution_index = i;
+                }
                 return;
             }
         }
@@ -564,4 +565,15 @@ void settings_launch(void)
         kb_scroll_offset = kb_layout_index - KB_VISIBLE_ROWS + 1;
     else
         kb_scroll_offset = 0;
+    /* Sync resolution index with actual framebuffer */
+    {
+        framebuffer_t *f = fb_get();
+        resolution_index = 0;
+        for (int i = 0; i < RES_COUNT; i++) {
+            if ((int)f->width == resolutions[i].w && (int)f->height == resolutions[i].h) {
+                resolution_index = i;
+                break;
+            }
+        }
+    }
 }
