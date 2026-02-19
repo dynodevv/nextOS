@@ -1291,12 +1291,14 @@ static void resize_canvas(window_t *w, int new_w, int new_h)
 {
     int cw = new_w - BORDER_W * 2;
     int ch = new_h - BORDER_W * 2;
-    if (w->canvas) kfree(w->canvas);
-    w->canvas = (uint32_t *)kmalloc(cw * ch * 4);
-    if (w->canvas) {
+    uint32_t *new_canvas = (uint32_t *)kmalloc(cw * ch * 4);
+    if (new_canvas) {
         for (int p = 0; p < cw * ch; p++)
-            w->canvas[p] = 0xF0F0F0;
+            new_canvas[p] = 0xF0F0F0;
+        if (w->canvas) kfree(w->canvas);
+        w->canvas = new_canvas;
     }
+    /* If alloc failed, keep old canvas — better than white screen */
     w->width = new_w;
     w->height = new_h;
 }

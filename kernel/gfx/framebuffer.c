@@ -346,12 +346,8 @@ void fb_init(uint64_t addr, uint32_t w, uint32_t h, uint32_t pitch, uint32_t bpp
     fb.pitch   = pitch;
     fb.bpp     = bpp;
 
-    /* Probe BGA once and configure virtual height for page flipping */
+    /* Probe BGA once for runtime resolution switching */
     bga_probe();
-    if (bga_detected) {
-        bga_write(VBE_DISPI_INDEX_VIRT_H, (uint16_t)(h * 2));
-        bga_write(VBE_DISPI_INDEX_Y_OFF, 0);
-    }
 
     /* Allocate back buffer */
     fb.backbuffer = (uint32_t *)kmalloc(w * h * 4);
@@ -371,7 +367,7 @@ int fb_set_resolution(uint32_t w, uint32_t h)
     bga_write(VBE_DISPI_INDEX_YRES, (uint16_t)h);
     bga_write(VBE_DISPI_INDEX_BPP, 32);
     bga_write(VBE_DISPI_INDEX_VIRT_W, (uint16_t)w);
-    bga_write(VBE_DISPI_INDEX_VIRT_H, (uint16_t)(h * 2));
+    bga_write(VBE_DISPI_INDEX_VIRT_H, (uint16_t)h);
     bga_write(VBE_DISPI_INDEX_X_OFF, 0);
     bga_write(VBE_DISPI_INDEX_Y_OFF, 0);
     bga_write(VBE_DISPI_INDEX_ENABLE, VBE_DISPI_ENABLED | VBE_DISPI_LFB_ENABLED);
@@ -402,12 +398,9 @@ void fb_swap(void)
 {
     if (fb.backbuffer == fb.address) return;
 
-    static int back_page = 0;
-    uint32_t page_offset = back_page ? fb.width * fb.height : 0;
-
-    /* Copy backbuffer to the off-screen VRAM page using 64-bit transfers */
+    /* Copy backbuffer to VRAM using 64-bit transfers */
     uint64_t *src = (uint64_t *)fb.backbuffer;
-    uint64_t *dst = (uint64_t *)(fb.address + page_offset);
+    uint64_t *dst = (uint64_t *)fb.address;
     uint32_t total = fb.width * fb.height / 2;
 
     for (uint32_t i = 0; i < total; i++) {
@@ -415,14 +408,8 @@ void fb_swap(void)
     }
     if (fb.width * fb.height & 1) {
         uint32_t last = fb.width * fb.height - 1;
-        fb.address[page_offset + last] = fb.backbuffer[last];
+        fb.address[last] = fb.backbuffer[last];
     }
-
-    /* Flip display to the page we just wrote (eliminates tearing) */
-    if (bga_detected)
-        bga_write(VBE_DISPI_INDEX_Y_OFF, back_page ? (uint16_t)fb.height : 0);
-
-    back_page ^= 1;
 }
 
 void fb_clear(uint32_t color)

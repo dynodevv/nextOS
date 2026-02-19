@@ -59,7 +59,7 @@ typedef struct {
 
 /* ── Kernel heap region ───────────────────────────────────────────────── */
 #define KERNEL_HEAP_START  0x400000    /* 4 MiB */
-#define KERNEL_HEAP_SIZE   0x1000000   /* 16 MiB */
+#define KERNEL_HEAP_SIZE   0x4000000   /* 64 MiB */
 #define FALLBACK_FB_ADDR   0xFD000000  /* Common QEMU framebuffer address */
 
 /* ── Installer / first boot state ─────────────────────────────────────── */

@@ -69,8 +69,11 @@ void settings_load_from_disk(void)
 }
 
 /* ── Tab identifiers ──────────────────────────────────────────────────── */
-typedef enum { TAB_DISPLAY = 0, TAB_THEME, TAB_KEYBOARD, TAB_MOUSE, TAB_COUNT } tab_t;
+typedef enum { TAB_DISPLAY = 0, TAB_THEME, TAB_KEYBOARD, TAB_MOUSE, TAB_CLOCK, TAB_COUNT } tab_t;
 static tab_t current_tab = TAB_DISPLAY;
+
+/* ── Click-edge state for buttons ─────────────────────────────────────── */
+static int prev_buttons = 0;
 
 /* ── Display settings state ───────────────────────────────────────────── */
 static int resolution_index = 0;
@@ -208,7 +211,7 @@ static void draw_canvas_string(uint32_t *canvas, int cw, int ch,
 }
 
 /* ── Tab drawing ──────────────────────────────────────────────────────── */
-static const char *tab_names[TAB_COUNT] = { "Display", "Theme", "Keyboard", "Mouse" };
+static const char *tab_names[TAB_COUNT] = { "Display", "Theme", "Keyboard", "Mouse", "Clock" };
 
 static void draw_tabs(uint32_t *canvas, int cw, int ch)
 {
@@ -253,32 +256,6 @@ static void draw_display_tab(uint32_t *canvas, int cw, int ch)
         draw_canvas_string(canvas, cw, ch, 30, by + 6,
                            resolutions[i].label, fg, bg);
     }
-
-    /* UTC offset setting */
-    int tz_y = 80 + RES_COUNT * 36 + 10;
-    draw_canvas_string(canvas, cw, ch, 20, tz_y + 4, "UTC Offset:",
-                       COL_LABEL, COL_LEATHER);
-    /* Minus button */
-    draw_canvas_gradient(canvas, cw, ch, 150, tz_y, 30, 24,
-                         COL_BTN_TOP, COL_BTN_BOT);
-    draw_canvas_string(canvas, cw, ch, 160, tz_y + 4, "-", COL_BTN_TEXT, COL_BTN_TOP);
-    /* Current offset value */
-    {
-        int off = compositor_get_utc_offset();
-        char off_str[6];
-        int pos = 0;
-        if (off >= 0) { off_str[pos++] = '+'; }
-        else { off_str[pos++] = '-'; off = -off; }
-        if (off >= 10) off_str[pos++] = '0' + off / 10;
-        off_str[pos++] = '0' + off % 10;
-        off_str[pos] = '\0';
-        draw_canvas_string(canvas, cw, ch, 188, tz_y + 4, off_str,
-                           COL_LABEL, COL_LEATHER);
-    }
-    /* Plus button */
-    draw_canvas_gradient(canvas, cw, ch, 230, tz_y, 30, 24,
-                         COL_BTN_TOP, COL_BTN_BOT);
-    draw_canvas_string(canvas, cw, ch, 240, tz_y + 4, "+", COL_BTN_TEXT, COL_BTN_TOP);
 }
 
 /* ── Theme tab ────────────────────────────────────────────────────────── */
@@ -395,6 +372,40 @@ static void draw_mouse_tab(uint32_t *canvas, int cw, int ch)
     }
 }
 
+/* ── Clock tab ────────────────────────────────────────────────────────── */
+static void draw_clock_tab(uint32_t *canvas, int cw, int ch)
+{
+    draw_canvas_gradient(canvas, cw, ch, 0, 32, cw, ch - 32,
+                         COL_LEATHER, COL_LEATHER_DARK);
+
+    draw_canvas_string(canvas, cw, ch, 20, 50, "UTC Offset:",
+                       COL_LABEL, COL_LEATHER);
+
+    /* Minus button */
+    draw_canvas_gradient(canvas, cw, ch, 20, 80, 60, 28,
+                         COL_BTN_TOP, COL_BTN_BOT);
+    draw_canvas_string(canvas, cw, ch, 42, 86, "-", COL_BTN_TEXT, COL_BTN_TOP);
+
+    /* Current offset value */
+    {
+        int off = compositor_get_utc_offset();
+        char off_str[6];
+        int pos = 0;
+        if (off >= 0) { off_str[pos++] = '+'; }
+        else { off_str[pos++] = '-'; off = -off; }
+        if (off >= 10) off_str[pos++] = '0' + off / 10;
+        off_str[pos++] = '0' + off % 10;
+        off_str[pos] = '\0';
+        draw_canvas_string(canvas, cw, ch, 100, 86, off_str,
+                           COL_LABEL, COL_LEATHER);
+    }
+
+    /* Plus button */
+    draw_canvas_gradient(canvas, cw, ch, 150, 80, 60, 28,
+                         COL_BTN_TOP, COL_BTN_BOT);
+    draw_canvas_string(canvas, cw, ch, 172, 86, "+", COL_BTN_TEXT, COL_BTN_TOP);
+}
+
 /* ── Paint callback ───────────────────────────────────────────────────── */
 static void settings_paint(window_t *win)
 {
@@ -414,6 +425,7 @@ static void settings_paint(window_t *win)
     case TAB_THEME:    draw_theme_tab(win->canvas, cw, ch);    break;
     case TAB_KEYBOARD: draw_keyboard_tab(win->canvas, cw, ch); break;
     case TAB_MOUSE:    draw_mouse_tab(win->canvas, cw, ch);    break;
+    case TAB_CLOCK:    draw_clock_tab(win->canvas, cw, ch);    break;
     default: break;
     }
 }
@@ -424,6 +436,8 @@ static void settings_mouse(window_t *win, int mx, int my, int buttons)
     (void)win;
 
     int cw = win->width - 4;
+    int click = (buttons & 1) && !(prev_buttons & 1);
+    prev_buttons = buttons;
 
     /* Handle keyboard scrollbar drag */
     if (kb_scrollbar_dragging) {
@@ -460,7 +474,7 @@ static void settings_mouse(window_t *win, int mx, int my, int buttons)
         }
     }
 
-    if (!(buttons & 1)) return;
+    if (!click) return;
 
     /* Tab click */
     if (my >= 0 && my < 30) {
@@ -483,26 +497,6 @@ static void settings_mouse(window_t *win, int mx, int my, int buttons)
                 }
                 return;
             }
-        }
-        /* UTC offset +/- buttons */
-        int tz_y = 80 + RES_COUNT * 36 + 10;
-        /* Minus button */
-        if (mx >= 150 && mx < 180 && my >= tz_y && my < tz_y + 24) {
-            int off = compositor_get_utc_offset();
-            if (off > -12) {
-                compositor_set_utc_offset(off - 1);
-                settings_save_to_disk();
-            }
-            return;
-        }
-        /* Plus button */
-        if (mx >= 230 && mx < 260 && my >= tz_y && my < tz_y + 24) {
-            int off = compositor_get_utc_offset();
-            if (off < 14) {
-                compositor_set_utc_offset(off + 1);
-                settings_save_to_disk();
-            }
-            return;
         }
     }
 
@@ -585,6 +579,28 @@ static void settings_mouse(window_t *win, int mx, int my, int buttons)
                 settings_save_to_disk();
                 return;
             }
+        }
+    }
+
+    /* Clock tab clicks */
+    if (current_tab == TAB_CLOCK) {
+        /* Minus button */
+        if (mx >= 20 && mx < 80 && my >= 80 && my < 108) {
+            int off = compositor_get_utc_offset();
+            if (off > -12) {
+                compositor_set_utc_offset(off - 1);
+                settings_save_to_disk();
+            }
+            return;
+        }
+        /* Plus button */
+        if (mx >= 150 && mx < 210 && my >= 80 && my < 108) {
+            int off = compositor_get_utc_offset();
+            if (off < 14) {
+                compositor_set_utc_offset(off + 1);
+                settings_save_to_disk();
+            }
+            return;
         }
     }
 }
