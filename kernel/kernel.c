@@ -723,9 +723,12 @@ void kernel_main(uint64_t mb_info_addr)
             compositor_handle_mouse(ms.x, ms.y, ms.buttons, scroll);
             /* Render all windows, wallpaper, taskbar to backbuffer */
             compositor_render_frame();
-            /* Draw cursor on top of the rendered frame */
-            compositor_draw_cursor(ms.x, ms.y);
+            /* Copy backbuffer to VRAM */
             fb_swap();
+            /* Draw cursor directly to VRAM at freshest mouse position
+             * (bypasses backbuffer for zero-latency cursor display) */
+            ms = mouse_get_state();
+            compositor_draw_cursor(ms.x, ms.y);
         }
 
         /* Target ~120 FPS for buttery-smooth experience */

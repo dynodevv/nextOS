@@ -74,6 +74,7 @@ static tab_t current_tab = TAB_DISPLAY;
 
 /* ── Click-edge state for buttons ─────────────────────────────────────── */
 static int prev_buttons = 0;
+static int mouse_slider_dragging = 0;
 
 /* ── Display settings state ───────────────────────────────────────────── */
 static int resolution_index = 0;
@@ -439,6 +440,22 @@ static void settings_mouse(window_t *win, int mx, int my, int buttons)
     int click = (buttons & 1) && !(prev_buttons & 1);
     prev_buttons = buttons;
 
+    /* Handle mouse speed slider drag (continuous while held) */
+    if (mouse_slider_dragging) {
+        if (!(buttons & 1)) {
+            mouse_slider_dragging = 0;
+            settings_save_to_disk();
+            return;
+        }
+        if (current_tab == TAB_MOUSE) {
+            int speed = 1 + (mx - 20) * 9 / 280;
+            if (speed < 1) speed = 1;
+            if (speed > 10) speed = 10;
+            mouse_set_speed(speed);
+        }
+        return;
+    }
+
     /* Handle keyboard scrollbar drag */
     if (kb_scrollbar_dragging) {
         if (!(buttons & 1)) {
@@ -561,13 +578,13 @@ static void settings_mouse(window_t *win, int mx, int my, int buttons)
 
     /* Mouse tab clicks */
     if (current_tab == TAB_MOUSE) {
-        /* Slider track click */
+        /* Slider track click — start drag */
         if (mx >= 20 && mx < 300 && my >= 72 && my < 104) {
             int speed = 1 + (mx - 20) * 9 / 280;
             if (speed < 1) speed = 1;
             if (speed > 10) speed = 10;
             mouse_set_speed(speed);
-            settings_save_to_disk();
+            mouse_slider_dragging = 1;
             return;
         }
         /* Preset buttons */

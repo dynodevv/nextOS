@@ -1028,12 +1028,18 @@ static const uint8_t cursor_bitmap[20][16] = {
 
 void compositor_draw_cursor(int mx, int my)
 {
+    /* Draw cursor directly to VRAM for zero-latency display.
+     * After fb_swap copies backbuffer→VRAM, we overlay the cursor
+     * onto VRAM at the freshest mouse position (from latest IRQ). */
+
     /* Shadow (offset +2,+2) */
     for (int r = 0; r < 20; r++) {
         for (int c = 0; c < 16; c++) {
-            if (cursor_bitmap[r][c])
-                fb_putpixel(mx + c + 2, my + r + 2,
-                            rgba_blend(fb_getpixel(mx + c + 2, my + r + 2), 0x000000, 60));
+            if (cursor_bitmap[r][c]) {
+                int px = mx + c + 2, py = my + r + 2;
+                uint32_t bg = fb_getpixel_vram(px, py);
+                fb_putpixel_vram(px, py, rgba_blend(bg, 0x000000, 60));
+            }
         }
     }
     /* Arrow body */
@@ -1041,9 +1047,9 @@ void compositor_draw_cursor(int mx, int my)
         for (int c = 0; c < 16; c++) {
             uint8_t v = cursor_bitmap[r][c];
             if (v == 1)
-                fb_putpixel(mx + c, my + r, 0x000000);
+                fb_putpixel_vram(mx + c, my + r, 0x000000);
             else if (v == 2)
-                fb_putpixel(mx + c, my + r, 0xFFFFFF);
+                fb_putpixel_vram(mx + c, my + r, 0xFFFFFF);
         }
     }
 }
