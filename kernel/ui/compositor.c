@@ -969,19 +969,34 @@ void desktop_draw_taskbar(void)
         uint64_t now = timer_get_ticks();
         if (now - clock_last_read >= 1000) {
             clock_last_read = now;
-            outb(0x70, 0x0B); uint8_t regb = inb(0x71);
-            outb(0x70, 0x04); uint8_t hour = inb(0x71);
-            outb(0x70, 0x02); uint8_t min  = inb(0x71);
-            if (!(regb & 0x04)) {
-                hour = (hour >> 4) * 10 + (hour & 0x0F);
-                min  = (min >> 4) * 10 + (min & 0x0F);
+            /* Wait for RTC update-in-progress (UIP) to clear */
+            outb(0x70, 0x0A);
+            if (!(inb(0x71) & 0x80)) {
+                outb(0x70, 0x0B); uint8_t regb = inb(0x71);
+                outb(0x70, 0x04); uint8_t hour = inb(0x71);
+                outb(0x70, 0x02); uint8_t min  = inb(0x71);
+                int is_pm = 0;
+                /* Handle 12-hour mode: strip PM bit before BCD conversion */
+                if (!(regb & 0x02)) {
+                    is_pm = (hour & 0x80) ? 1 : 0;
+                    hour &= 0x7F;
+                }
+                if (!(regb & 0x04)) {
+                    hour = (hour >> 4) * 10 + (hour & 0x0F);
+                    min  = (min >> 4) * 10 + (min & 0x0F);
+                }
+                /* Convert 12-hour to 24-hour */
+                if (!(regb & 0x02)) {
+                    if (hour == 12) hour = 0;
+                    if (is_pm) hour += 12;
+                }
+                /* Apply UTC offset */
+                int h = (int)hour + clock_utc_offset;
+                if (h < 0) h += 24;
+                if (h >= 24) h -= 24;
+                cached_hour = (uint8_t)h;
+                cached_min  = (min <= 59) ? min : 0;
             }
-            /* Apply UTC offset */
-            int h = (int)hour + clock_utc_offset;
-            if (h < 0) h += 24;
-            if (h >= 24) h -= 24;
-            cached_hour = (uint8_t)h;
-            cached_min  = (min <= 59) ? min : 0;
         }
 
         char time_str[6];
@@ -1084,6 +1099,8 @@ int compositor_get_utc_offset(void)
 
 int compositor_set_resolution(int w, int h)
 {
+    if (w < 640 || h < 480 || w > 1920 || h > 1080)
+        return -1;
     if (fb_set_resolution((uint32_t)w, (uint32_t)h) != 0)
         return -1;
 
@@ -1297,10 +1314,10 @@ static void resize_canvas(window_t *w, int new_w, int new_h)
             new_canvas[p] = 0xF0F0F0;
         if (w->canvas) kfree(w->canvas);
         w->canvas = new_canvas;
+        w->width = new_w;
+        w->height = new_h;
     }
-    /* If alloc failed, keep old canvas — better than white screen */
-    w->width = new_w;
-    w->height = new_h;
+    /* If alloc failed, keep old canvas AND old dimensions */
 }
 
 void compositor_handle_mouse(int mx, int my, int buttons, int scroll)
