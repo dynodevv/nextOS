@@ -59,7 +59,7 @@ typedef struct {
 
 /* ── Kernel heap region ───────────────────────────────────────────────── */
 #define KERNEL_HEAP_START  0x400000    /* 4 MiB */
-#define KERNEL_HEAP_SIZE   0x1000000   /* 16 MiB */
+#define KERNEL_HEAP_SIZE   0x4000000   /* 64 MiB */
 #define FALLBACK_FB_ADDR   0xFD000000  /* Common QEMU framebuffer address */
 
 /* ── Installer / first boot state ─────────────────────────────────────── */
@@ -550,7 +550,7 @@ static void about_paint(window_t *win)
 
     /* Version & info lines */
     const char *lines[] = {
-        "Version 2.5.0",
+        "Version 3.0.0",
         "",
         "A next-generation",
         "operating system.",
@@ -719,9 +719,15 @@ void kernel_main(uint64_t mb_info_addr)
             draw_installer();
             handle_installer_input();
         } else {
-            /* Desktop compositor frame */
-            compositor_render_frame();
+            /* Process input first so positions are up-to-date before rendering */
             compositor_handle_mouse(ms.x, ms.y, ms.buttons, scroll);
+            /* Render all windows, wallpaper, taskbar to backbuffer */
+            compositor_render_frame();
+            /* Re-read mouse for freshest position, draw cursor into backbuffer,
+             * then swap atomically — cursor is always part of the VRAM copy
+             * so it never flickers (unlike VRAM-direct overlay approach) */
+            ms = mouse_get_state();
+            compositor_draw_cursor(ms.x, ms.y);
             fb_swap();
         }
 

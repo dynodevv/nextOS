@@ -63,6 +63,9 @@ struct window_s {
 void      compositor_init(void);
 void      compositor_set_theme(theme_t theme);
 theme_t   compositor_get_theme(void);
+int       compositor_set_resolution(int w, int h);
+void      compositor_set_utc_offset(int hours);
+int       compositor_get_utc_offset(void);
 window_t *compositor_create_window(const char *title, int x, int y, int w, int h);
 void      compositor_destroy_window(window_t *win);
 void      compositor_render_frame(void);

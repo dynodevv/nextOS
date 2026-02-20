@@ -26,7 +26,10 @@ typedef struct {
     uint32_t theme;
     uint32_t kb_layout;
     uint32_t mouse_speed;
-    uint8_t  reserved[512 - 16];
+    uint32_t resolution_w;
+    uint32_t resolution_h;
+    int32_t  utc_offset;      /* UTC offset in hours (-12..+14) */
+    uint8_t  reserved[512 - 28];
 } __attribute__((packed)) settings_disk_t;
 
 void settings_save_to_disk(void)
@@ -38,6 +41,10 @@ void settings_save_to_disk(void)
     cfg.theme = (uint32_t)compositor_get_theme();
     cfg.kb_layout = (uint32_t)keyboard_get_layout();
     cfg.mouse_speed = (uint32_t)mouse_get_speed();
+    framebuffer_t *f = fb_get();
+    cfg.resolution_w = f->width;
+    cfg.resolution_h = f->height;
+    cfg.utc_offset = (int32_t)compositor_get_utc_offset();
     disk_write(disk, SETTINGS_LBA, 1, &cfg);
 }
 
@@ -54,11 +61,20 @@ void settings_load_from_disk(void)
         keyboard_set_layout((kb_layout_t)cfg.kb_layout);
     if (cfg.mouse_speed >= 1 && cfg.mouse_speed <= 10)
         mouse_set_speed((int)cfg.mouse_speed);
+    if (cfg.resolution_w >= 640 && cfg.resolution_w <= 1920 &&
+        cfg.resolution_h >= 480 && cfg.resolution_h <= 1080)
+        compositor_set_resolution((int)cfg.resolution_w, (int)cfg.resolution_h);
+    if (cfg.utc_offset >= -12 && cfg.utc_offset <= 14)
+        compositor_set_utc_offset((int)cfg.utc_offset);
 }
 
 /* ── Tab identifiers ──────────────────────────────────────────────────── */
-typedef enum { TAB_DISPLAY = 0, TAB_THEME, TAB_KEYBOARD, TAB_MOUSE, TAB_COUNT } tab_t;
+typedef enum { TAB_DISPLAY = 0, TAB_THEME, TAB_KEYBOARD, TAB_MOUSE, TAB_CLOCK, TAB_COUNT } tab_t;
 static tab_t current_tab = TAB_DISPLAY;
+
+/* ── Click-edge state for buttons ─────────────────────────────────────── */
+static int prev_buttons = 0;
+static int mouse_slider_dragging = 0;
 
 /* ── Display settings state ───────────────────────────────────────────── */
 static int resolution_index = 0;
@@ -97,6 +113,14 @@ static int kb_scrollbar_drag_offset = 0;
 #define COL_LEATHER      0xC4A882
 #define COL_LEATHER_DARK 0x8B7355
 #define COL_DIVIDER      0xA09080
+
+static int speed_from_slider(int mx)
+{
+    int speed = 1 + (mx - 20) * 9 / 280;
+    if (speed < 1) speed = 1;
+    if (speed > 10) speed = 10;
+    return speed;
+}
 
 /* ── Drawing helpers ──────────────────────────────────────────────────── */
 static window_t *settings_win = (void *)0;
@@ -196,7 +220,7 @@ static void draw_canvas_string(uint32_t *canvas, int cw, int ch,
 }
 
 /* ── Tab drawing ──────────────────────────────────────────────────────── */
-static const char *tab_names[TAB_COUNT] = { "Display", "Theme", "Keyboard", "Mouse" };
+static const char *tab_names[TAB_COUNT] = { "Display", "Theme", "Keyboard", "Mouse", "Clock" };
 
 static void draw_tabs(uint32_t *canvas, int cw, int ch)
 {
@@ -357,6 +381,40 @@ static void draw_mouse_tab(uint32_t *canvas, int cw, int ch)
     }
 }
 
+/* ── Clock tab ────────────────────────────────────────────────────────── */
+static void draw_clock_tab(uint32_t *canvas, int cw, int ch)
+{
+    draw_canvas_gradient(canvas, cw, ch, 0, 32, cw, ch - 32,
+                         COL_LEATHER, COL_LEATHER_DARK);
+
+    draw_canvas_string(canvas, cw, ch, 20, 50, "UTC Offset:",
+                       COL_LABEL, COL_LEATHER);
+
+    /* Minus button */
+    draw_canvas_gradient(canvas, cw, ch, 20, 80, 60, 28,
+                         COL_BTN_TOP, COL_BTN_BOT);
+    draw_canvas_string(canvas, cw, ch, 42, 86, "-", COL_BTN_TEXT, COL_BTN_TOP);
+
+    /* Current offset value */
+    {
+        int off = compositor_get_utc_offset();
+        char off_str[6];
+        int pos = 0;
+        if (off >= 0) { off_str[pos++] = '+'; }
+        else { off_str[pos++] = '-'; off = -off; }
+        if (off >= 10) off_str[pos++] = '0' + off / 10;
+        off_str[pos++] = '0' + off % 10;
+        off_str[pos] = '\0';
+        draw_canvas_string(canvas, cw, ch, 100, 86, off_str,
+                           COL_LABEL, COL_LEATHER);
+    }
+
+    /* Plus button */
+    draw_canvas_gradient(canvas, cw, ch, 150, 80, 60, 28,
+                         COL_BTN_TOP, COL_BTN_BOT);
+    draw_canvas_string(canvas, cw, ch, 172, 86, "+", COL_BTN_TEXT, COL_BTN_TOP);
+}
+
 /* ── Paint callback ───────────────────────────────────────────────────── */
 static void settings_paint(window_t *win)
 {
@@ -376,6 +434,7 @@ static void settings_paint(window_t *win)
     case TAB_THEME:    draw_theme_tab(win->canvas, cw, ch);    break;
     case TAB_KEYBOARD: draw_keyboard_tab(win->canvas, cw, ch); break;
     case TAB_MOUSE:    draw_mouse_tab(win->canvas, cw, ch);    break;
+    case TAB_CLOCK:    draw_clock_tab(win->canvas, cw, ch);    break;
     default: break;
     }
 }
@@ -386,6 +445,21 @@ static void settings_mouse(window_t *win, int mx, int my, int buttons)
     (void)win;
 
     int cw = win->width - 4;
+    int click = (buttons & 1) && !(prev_buttons & 1);
+    prev_buttons = buttons;
+
+    /* Handle mouse speed slider drag (continuous while held) */
+    if (mouse_slider_dragging) {
+        if (!(buttons & 1)) {
+            mouse_slider_dragging = 0;
+            settings_save_to_disk();
+            return;
+        }
+        if (current_tab == TAB_MOUSE) {
+            mouse_set_speed(speed_from_slider(mx));
+        }
+        return;
+    }
 
     /* Handle keyboard scrollbar drag */
     if (kb_scrollbar_dragging) {
@@ -422,7 +496,7 @@ static void settings_mouse(window_t *win, int mx, int my, int buttons)
         }
     }
 
-    if (!(buttons & 1)) return;
+    if (!click) return;
 
     /* Tab click */
     if (my >= 0 && my < 30) {
@@ -437,9 +511,12 @@ static void settings_mouse(window_t *win, int mx, int my, int buttons)
         for (int i = 0; i < RES_COUNT; i++) {
             int by = 80 + i * 36;
             if (mx >= 20 && mx < 220 && my >= by && my < by + 28) {
-                resolution_index = i;
-                /* TODO: Actually change framebuffer mode via BIOS int 10h
-                 * or GOP protocol in a full UEFI implementation */
+                if (i != resolution_index) {
+                    if (compositor_set_resolution(resolutions[i].w, resolutions[i].h) == 0) {
+                        resolution_index = i;
+                        settings_save_to_disk();
+                    }
+                }
                 return;
             }
         }
@@ -506,13 +583,10 @@ static void settings_mouse(window_t *win, int mx, int my, int buttons)
 
     /* Mouse tab clicks */
     if (current_tab == TAB_MOUSE) {
-        /* Slider track click */
+        /* Slider track click — start drag */
         if (mx >= 20 && mx < 300 && my >= 72 && my < 104) {
-            int speed = 1 + (mx - 20) * 9 / 280;
-            if (speed < 1) speed = 1;
-            if (speed > 10) speed = 10;
-            mouse_set_speed(speed);
-            settings_save_to_disk();
+            mouse_set_speed(speed_from_slider(mx));
+            mouse_slider_dragging = 1;
             return;
         }
         /* Preset buttons */
@@ -524,6 +598,28 @@ static void settings_mouse(window_t *win, int mx, int my, int buttons)
                 settings_save_to_disk();
                 return;
             }
+        }
+    }
+
+    /* Clock tab clicks */
+    if (current_tab == TAB_CLOCK) {
+        /* Minus button */
+        if (mx >= 20 && mx < 80 && my >= 80 && my < 108) {
+            int off = compositor_get_utc_offset();
+            if (off > -12) {
+                compositor_set_utc_offset(off - 1);
+                settings_save_to_disk();
+            }
+            return;
+        }
+        /* Plus button */
+        if (mx >= 150 && mx < 210 && my >= 80 && my < 108) {
+            int off = compositor_get_utc_offset();
+            if (off < 14) {
+                compositor_set_utc_offset(off + 1);
+                settings_save_to_disk();
+            }
+            return;
         }
     }
 }
@@ -564,4 +660,15 @@ void settings_launch(void)
         kb_scroll_offset = kb_layout_index - KB_VISIBLE_ROWS + 1;
     else
         kb_scroll_offset = 0;
+    /* Sync resolution index with actual framebuffer */
+    {
+        framebuffer_t *f = fb_get();
+        resolution_index = 0;
+        for (int i = 0; i < RES_COUNT; i++) {
+            if ((int)f->width == resolutions[i].w && (int)f->height == resolutions[i].h) {
+                resolution_index = i;
+                break;
+            }
+        }
+    }
 }

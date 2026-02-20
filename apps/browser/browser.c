@@ -2680,7 +2680,7 @@ static const char homepage[] =
     "<body bgcolor=\"#F0F0F0\">"
     "<h1>Welcome to nextOS Browser</h1>"
     "<hr>"
-    "<p>This is the built-in web browser for <b>nextOS 2.5.0</b>.</p>"
+    "<p>This is the built-in web browser for <b>nextOS 3.0.0</b>.</p>"
     "<p>Type a URL in the address bar above and press Enter to navigate.</p>"
     "<h2>Features</h2>"
     "<ul>"
@@ -2707,7 +2707,7 @@ static const char homepage[] =
     "<li>HTTPS URLs are supported for secure sites</li>"
     "</ol>"
     "<hr>"
-    "<p><i>nextOS 2.5.0 - A next-generation operating system</i></p>"
+    "<p><i>nextOS 3.0.0 - A next-generation operating system</i></p>"
     "</body></html>";
 
 static void load_homepage(void)

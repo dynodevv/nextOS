@@ -718,7 +718,7 @@ int http_get(const char *host, uint16_t port, const char *path,
         if (rpos >= max_rpos) { tcp_close(); return -1; }
         request[rpos++] = host[i];
     }
-    const char *hdr = "\r\nConnection: close\r\nUser-Agent: nextOS/2.5.0\r\n\r\n";
+    const char *hdr = "\r\nConnection: close\r\nUser-Agent: nextOS/3.0.0\r\n\r\n";
     for (int i = 0; hdr[i]; i++) {
         if (rpos >= max_rpos) { tcp_close(); return -1; }
         request[rpos++] = hdr[i];
@@ -1510,7 +1510,7 @@ int https_get(const char *host, uint16_t port, const char *path,
         if (rpos >= max_rpos) { tcp_close(); return -1; }
         request[rpos++] = host[i];
     }
-    const char *hdr = "\r\nConnection: close\r\nUser-Agent: nextOS/2.5.0\r\nAccept: text/html,*/*\r\n\r\n";
+    const char *hdr = "\r\nConnection: close\r\nUser-Agent: nextOS/3.0.0\r\nAccept: text/html,*/*\r\n\r\n";
     for (int i = 0; hdr[i]; i++) {
         if (rpos >= max_rpos) { tcp_close(); return -1; }
         request[rpos++] = hdr[i];
