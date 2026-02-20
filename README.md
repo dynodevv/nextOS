@@ -1,12 +1,20 @@
 # nextOS
 
 ```
-    ██╗   ██╗
-    ████╗  ██║  nextOS
-    ██╔██╗ ██║  The next generation
-    ██║╚██╗██║  operating system
-    ██║ ╚████║
-    ╚═╝  ╚═══╝
+                                               ,----..               
+                                     ___      /   /   \   .--.--.    
+                                   ,--.'|_   /   .     : /  /    '.  
+      ,---,                        |  | :,' .   /   ;.  \  :  /`. /  
+  ,-+-. /  |           ,--,  ,--,  :  : ' :.   ;   /  ` ;  |  |--`   
+ ,--.'|'   |   ,---.   |'. \/ .`|.;__,'  / ;   |  ; \ ; |  :  ;_     
+|   |  ,"' |  /     \  '  \/  / ;|  |   |  |   :  | ; | '\  \    `.  
+|   | /  | | /    /  |  \  \.' / :__,'| :  .   |  ' ' ' : `----.   \ 
+|   | |  | |.    ' / |   \  ;  ;   '  : |__'   ;  \; /  | __ \  \  | 
+|   | |  |/ '   ;   /|  / \  \  \  |  | '.'|\   \  ',  / /  /`--'  / 
+|   | |--'  '   |  / |./__;   ;  \ ;  :    ; ;   :    / '--'.     /  
+|   |/      |   :    ||   :/\  \ ; |  ,   /   \   \ .'    `--'---'   
+'---'        \   \  / `---'  `--`   ---`-'     `---`                 
+              `----'                                                 
 ```
 
 A highly optimized 64-bit operating system featuring a skeuomorphic desktop environment.
@@ -99,7 +107,7 @@ The build produces:
 ### QEMU
 
 ```bash
-qemu-system-x86_64 -cdrom nextos.iso -m 256M
+qemu-system-x86_64 -cdrom nextos.iso -m 2G
 ```
 
 ### VirtualBox / VMware
@@ -143,14 +151,17 @@ sudo dd if=nextos.iso of=/dev/sdX bs=4M status=progress
 - Full text editing (cursor, backspace, enter, arrow keys)
 - Open/Save dialogs for reading/writing files to disk
 
+### Browser (`Ctrl+4`)
+
+- Support for both HTTP and HTTPS websites
+- Custom HTML renderer engine
+- Partial HTML and CSS support
+
 ## Keyboard Layouts
 
 The keyboard driver supports 26 layouts with full scancode-to-ASCII mapping:
 
-US English, **Hungarian**, German, French, Spanish, Italian, Portuguese,
-UK English, Czech, Polish, Romanian, Slovak, Croatian, Slovenian, Swedish,
-Norwegian, Danish, Finnish, Dutch, Belgian, Swiss, Turkish, Russian,
-Japanese, Korean, Brazilian
+US English, Hungarian, German, French, Spanish, Italian, Portuguese, UK English, Czech, Polish, Romanian, Slovak, Croatian, Slovenian, Swedish, Norwegian, Danish, Finnish, Dutch, Belgian, Swiss, Turkish, Russian, Japanese, Korean, Brazilian
 
 ## Design Philosophy
 
