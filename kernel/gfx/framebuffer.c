@@ -435,21 +435,6 @@ uint32_t fb_getpixel(int x, int y)
     return 0;
 }
 
-/* VRAM-direct pixel ops — used for hardware-style cursor rendering */
-void fb_putpixel_vram(int x, int y, uint32_t color)
-{
-    if (x >= 0 && x < (int)fb.width && y >= 0 && y < (int)fb.height) {
-        fb.address[y * fb.width + x] = color;
-    }
-}
-
-uint32_t fb_getpixel_vram(int x, int y)
-{
-    if (x >= 0 && x < (int)fb.width && y >= 0 && y < (int)fb.height) {
-        return fb.address[y * fb.width + x];
-    }
-    return 0;
-}
 
 void fb_fill_rect(int x, int y, int w, int h, uint32_t color)
 {

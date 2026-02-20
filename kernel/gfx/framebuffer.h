@@ -22,8 +22,6 @@ void      fb_swap(void);
 void      fb_clear(uint32_t color);
 void      fb_putpixel(int x, int y, uint32_t color);
 uint32_t  fb_getpixel(int x, int y);
-void      fb_putpixel_vram(int x, int y, uint32_t color);
-uint32_t  fb_getpixel_vram(int x, int y);
 void      fb_fill_rect(int x, int y, int w, int h, uint32_t color);
 void      fb_draw_rect(int x, int y, int w, int h, uint32_t color);
 void      fb_draw_line(int x0, int y0, int x1, int y1, uint32_t color);

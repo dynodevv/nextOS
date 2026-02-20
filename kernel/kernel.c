@@ -723,12 +723,12 @@ void kernel_main(uint64_t mb_info_addr)
             compositor_handle_mouse(ms.x, ms.y, ms.buttons, scroll);
             /* Render all windows, wallpaper, taskbar to backbuffer */
             compositor_render_frame();
-            /* Copy backbuffer to VRAM */
-            fb_swap();
-            /* Draw cursor directly to VRAM at freshest mouse position
-             * (bypasses backbuffer for zero-latency cursor display) */
+            /* Re-read mouse for freshest position, draw cursor into backbuffer,
+             * then swap atomically — cursor is always part of the VRAM copy
+             * so it never flickers (unlike VRAM-direct overlay approach) */
             ms = mouse_get_state();
             compositor_draw_cursor(ms.x, ms.y);
+            fb_swap();
         }
 
         /* Target ~120 FPS for buttery-smooth experience */
