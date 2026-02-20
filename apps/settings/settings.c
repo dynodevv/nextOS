@@ -114,6 +114,14 @@ static int kb_scrollbar_drag_offset = 0;
 #define COL_LEATHER_DARK 0x8B7355
 #define COL_DIVIDER      0xA09080
 
+static int speed_from_slider(int mx)
+{
+    int speed = 1 + (mx - 20) * 9 / 280;
+    if (speed < 1) speed = 1;
+    if (speed > 10) speed = 10;
+    return speed;
+}
+
 /* ── Drawing helpers ──────────────────────────────────────────────────── */
 static window_t *settings_win = (void *)0;
 
@@ -448,10 +456,7 @@ static void settings_mouse(window_t *win, int mx, int my, int buttons)
             return;
         }
         if (current_tab == TAB_MOUSE) {
-            int speed = 1 + (mx - 20) * 9 / 280;
-            if (speed < 1) speed = 1;
-            if (speed > 10) speed = 10;
-            mouse_set_speed(speed);
+            mouse_set_speed(speed_from_slider(mx));
         }
         return;
     }
@@ -580,10 +585,7 @@ static void settings_mouse(window_t *win, int mx, int my, int buttons)
     if (current_tab == TAB_MOUSE) {
         /* Slider track click — start drag */
         if (mx >= 20 && mx < 300 && my >= 72 && my < 104) {
-            int speed = 1 + (mx - 20) * 9 / 280;
-            if (speed < 1) speed = 1;
-            if (speed > 10) speed = 10;
-            mouse_set_speed(speed);
+            mouse_set_speed(speed_from_slider(mx));
             mouse_slider_dragging = 1;
             return;
         }
